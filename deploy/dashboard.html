@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>llm-router dashboard</title>
+  <style>
+    :root { color-scheme: dark light; }
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 1rem; background: #0f1115; color: #e6e6e6; }
+    h1 { font-size: 1.25rem; margin: 0 0 .5rem; }
+    #status { font-size: .85rem; color: #9aa0a6; margin-bottom: 1rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    th, td { text-align: left; padding: .45rem .55rem; border-bottom: 1px solid #2c2f36; white-space: nowrap; }
+    th { color: #bdc1c6; position: sticky; top: 0; background: #0f1115; }
+    td.ts { font-variant-numeric: tabular-nums; color: #9aa0a6; }
+    td.chosen { font-weight: 600; color: #8ab4f8; }
+    td.kind { color: #c58af9; }
+    td.imp-low { color: #81c995; }
+    td.imp-normal { color: #9aa0a6; }
+    td.imp-high { color: #fdd663; }
+    td.cost { font-variant-numeric: tabular-nums; color: #f28b82; }
+    td.reason { color: #81c995; }
+    td.reason.lease { color: #f28b82; }
+    td.reason.budget-cap { color: #f28b82; font-weight: 600; }
+    td.reason.pin-swap { color: #fdd663; font-weight: 600; }
+    tr.alarm td { background: #3e1c1c; }
+    tr.alarm:hover td { background: #4f2424; }
+    td.candidates { max-width: 18rem; overflow: hidden; text-overflow: ellipsis; }
+    tr:hover td { background: #1a1d23; }
+    .badge { display: inline-block; padding: .1rem .35rem; border-radius: .25rem; background: #2c2f36; font-size: .75rem; }
+    .empty { color: #9aa0a6; margin-top: 1rem; }
+    #error { color: #f28b82; margin-top: 1rem; }
+    #token-bar { display: flex; gap: .5rem; margin-bottom: .75rem; }
+    input { background: #1a1d23; color: #e6e6e6; border: 1px solid #3c4043; border-radius: .25rem; padding: .35rem .5rem; flex: 1; }
+    button { background: #8ab4f8; color: #0f1115; border: none; border-radius: .25rem; padding: .35rem .7rem; cursor: pointer; }
+    button:hover { background: #aecbfa; }
+    .live { color: #81c995; }
+    .dead { color: #f28b82; }
+    a { color: #8ab4f8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>llm-router dashboard</h1>
+  <div id="token-bar">
+    <input id="token" type="text" placeholder="CONTROL_TOKEN from the VPS .env" autocomplete="off">
+    <button id="load">Load</button>
+  </div>
+  <div id="status">Waiting for token.</div>
+  <div id="error"></div>
+  <table id="decisions" hidden>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Chosen</th>
+        <th>Kind</th>
+        <th>Importance</th>
+        <th>Reason</th>
+        <th>Scale</th>
+        <th>Est. HKD</th>
+        <th>Session spend</th>
+        <th>Directives</th>
+        <th>Lease</th>
+        <th>Session</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <p id="empty" class="empty" hidden>No decisions yet.</p>
+
+<script>
+  const TOKEN_KEY = 'router-control-token';
+  const tokenInput = document.getElementById('token');
+  const status = document.getElementById('status');
+  const error = document.getElementById('error');
+  const table = document.getElementById('decisions');
+  const tbody = table.querySelector('tbody');
+  const empty = document.getElementById('empty');
+
+  // Persist the control token locally (it is not the proxy master key).
+  tokenInput.value = localStorage.getItem(TOKEN_KEY) || '';
+
+  function fmtTime(ts) {
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  }
+
+  function modelShort(full) { return full.replace('openai/', ''); }
+
+  async function load() {
+    const token = tokenInput.value.trim();
+    if (!token) { error.textContent = 'Paste CONTROL_TOKEN first.'; return; }
+    localStorage.setItem(TOKEN_KEY, token);
+    error.textContent = '';
+    status.textContent = 'Loading…';
+
+    const base = new URL('.', window.location.href).href.replace(/\/$/, '').replace(/\/dashboard$/, '');
+    const decisionsUrl = `${base}/decisions?n=50`;
+    const healthUrl = `${base}/health`;
+    try {
+      const [decRes, healthRes] = await Promise.all([
+        fetch(decisionsUrl, { headers: { 'Authorization': `Bearer ${token}` } }),
+        fetch(healthUrl, { headers: { 'Authorization': `Bearer ${token}` } }),
+      ]);
+      if (decRes.status === 401) throw new Error('Unauthorized — wrong CONTROL_TOKEN');
+      if (!decRes.ok) throw new Error(`HTTP ${decRes.status}: ${await decRes.text()}`);
+      const data = await decRes.json();
+      let health = {};
+      if (healthRes.ok) health = await healthRes.json();
+      render(data.decisions || [], health);
+      status.innerHTML = `Connected. <span class="live">●</span> ` +
+        (health.budget_hkd != null ? `Budget cap: ${health.budget_hkd.toFixed(2)} HKD. ` : 'No budget cap. ') +
+        `Refresh the page any time.`;
+    } catch (e) {
+      status.innerHTML = `<span class="dead">●</span> Disconnected`;
+      error.textContent = e.message;
+      table.hidden = true;
+      empty.hidden = true;
+    }
+  }
+
+  function render(rows, health) {
+    tbody.innerHTML = '';
+    if (!rows.length) { table.hidden = true; empty.hidden = false; return; }
+    table.hidden = false;
+    empty.hidden = true;
+    const budget = health.budget_hkd;
+    rows.slice().reverse().forEach(r => {
+      const tr = document.createElement('tr');
+      let reasonClass = '';
+      if (r.reason && r.reason.startsWith('lease')) reasonClass = 'lease';
+      if (r.reason === 'budget-cap') reasonClass = 'budget-cap';
+      if (r.reason === 'pin-swap') reasonClass = 'pin-swap';
+      if (r.budget_alarm) tr.classList.add('alarm');
+      const candidates = (r.candidates || []).map(modelShort).join(', ');
+      const imp = r.importance;
+      const impLabel = imp === 0 ? 'Low' : imp === 2 ? 'High' : 'Normal';
+      const impClass = imp === 0 ? 'imp-low' : imp === 2 ? 'imp-high' : 'imp-normal';
+      const spend = r.spend_hkd != null ? r.spend_hkd.toFixed(2) : '—';
+      const budgetCell = budget != null ? `${spend} / ${budget.toFixed(2)}` : spend;
+      tr.innerHTML = `
+        <td class="ts">${fmtTime(r.ts)}</td>
+        <td class="chosen">${modelShort(r.chosen)}</td>
+        <td class="kind">${r.kind || '—'}</td>
+        <td class="${impClass}">${r.importance != null ? impLabel : '—'}</td>
+        <td class="reason ${reasonClass}">${r.reason || '—'}</td>
+        <td>${r.scale ?? '—'}</td>
+        <td class="cost">${r.est_cost_hkd != null ? r.est_cost_hkd.toFixed(3) : '—'}</td>
+        <td>${budgetCell}</td>
+        <td>${(r.directives || []).map(d => `<span class="badge">${d}</span>`).join(' ') || '—'}</td>
+        <td>${r.lease ? modelShort(r.lease.model) : '—'}</td>
+        <td>${(r.session || '').slice(0, 8)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  document.getElementById('load').addEventListener('click', load);
+  tokenInput.addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
+  if (tokenInput.value) load();
+</script>
+</body>
+</html>

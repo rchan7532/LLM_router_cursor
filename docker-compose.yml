@@ -1,0 +1,90 @@
+services:
+  litellm:
+    # Pin the tag once the proxy starts cleanly. `main-stable` moves, and the
+    # routing-plugin pipeline this setup depends on is versioned: verify with
+    # `pip show litellm` on the machine you tested against and pin that tag.
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: llm-router
+    restart: unless-stopped
+    command: ["--config", "/app/litellm-config.yaml", "--port", "4000"]
+    volumes:
+      - ./litellm-config.yaml:/app/litellm-config.yaml:ro
+      # routing_policy.py is resolved relative to the config file, so it must
+      # sit next to litellm-config.yaml inside the container.
+      - ./routing_policy.py:/app/routing_policy.py:ro
+      # control_store.py is imported by routing_policy (optional import).
+      - ./control_store.py:/app/control_store.py:ro
+      # learning.py (learner: verdicts, evidence tables, phase-2 queue) and
+      # extractor.py (phase-2 direct-to-upstream extraction client, review
+      # M2: never through this proxy) are imported by routing_policy.
+      - ./learning.py:/app/learning.py:ro
+      - ./extractor.py:/app/extractor.py:ro
+      # failure_hook.py is the litellm_settings.callbacks phase-3 reliability
+      # hook (log-and-expose only, no routing effect - review q4).
+      - ./failure_hook.py:/app/failure_hook.py:ro
+      # laya_scorer.py is the optional local shadow scorer. It is imported
+      # by routing_policy.py but only starts a background thread when the
+      # `laya` package is present and learning is enabled.
+      - ./laya_scorer.py:/app/laya_scorer.py:ro
+      - router-logs:/app/logs
+      # Crossed mounts (review B4): the proxy READS control.json and can
+      # never write it; only the control service has the rw mount. learned.json
+      # and routing.jsonl live on router-logs, which the proxy owns.
+      - control-data:/control:ro
+    env_file:
+      - .env
+    environment:
+      # Decision log. Read it to see which model served which turn and why.
+      POLICY_LOG: /app/logs/routing.jsonl
+      # control.json is on the read-only /control mount (single writer is
+      # the control service - review B4); learned.json and the decision log
+      # live on /app/logs, which the proxy owns.
+      POLICY_STATE_DIR: /app/logs
+      CONTROL_PATH: /control/control.json
+    ports:
+      # Loopback only. nginx terminates TLS on the host and proxies to this.
+      - "127.0.0.1:4000:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=5).status == 200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  control:
+    # The single writer of control.json (review B4). The policy only reads it
+    # (mtime-cached), so this service can restart freely without touching
+    # the request path. It authenticates every request itself with
+    # CONTROL_TOKEN; the nginx path token is not authentication (review m3).
+    image: python:3.12-slim
+    container_name: llm-router-control
+    restart: unless-stopped
+    command: ["python", "/app/control_service.py"]
+    volumes:
+      - ./control_service.py:/app/control_service.py:ro
+      - control-data:/control        # rw: the ONLY control.json writer
+      - router-logs:/logs:ro         # ro: reads routing.jsonl + learned.json only
+    environment:
+      # control.json lives on its own volume; learned.json and the decision
+      # log are proxy-owned files read through the read-only mount.
+      CONTROL_PATH: /control/control.json
+      LEARNED_PATH: /logs/learned.json
+      POLICY_LOG: /logs/routing.jsonl
+      CONTROL_PORT: "4010"
+      # Bind inside the container must be 0.0.0.0 for the host-loopback
+      # publish (127.0.0.1:4010) to reach it; the host side stays private.
+      CONTROL_HOST: 0.0.0.0
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:4010:4010"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4010/health', timeout=5).status == 200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  router-logs:
+  control-data:

@@ -1,0 +1,260 @@
+# =============================================================================
+# LiteLLM proxy config - task-aware policy routing
+#
+# Cursor points at this proxy ONCE and asks for the single model `cursor-auto`.
+# `routing_policy.router_policy` sees every request, decides which model
+# should serve it, and narrows the candidate list to that one. litellm still
+# owns retries, per-deployment cooldowns and cross-key failover.
+#
+#   Default key: glm-5.3-flash, glm-5.3 (w=1), kimi-k2.7-code, claude-haiku-4-5,
+#                kimi-k3 (direct name only)
+#   Basic key:   qwen3-vl-flash, qwen3.8-flash, deepseek-v4.1-flash,
+#                glm-5.3 (w=9), qwen3.8-max (direct name only)
+#
+# The direct model names below are escape hatches: if you want to bypass the
+# policy, pick `kimi-k2.7-code` (or another) as the model in Cursor instead of
+# `cursor-auto`. The policy skips any group that is not the full cursor-auto
+# fleet, so those picks behave exactly as named.
+#
+# NOTE: ASCII-only on purpose. On Windows with a non-UTF8 locale (cp950/Big5),
+# Python reads config files with the legacy codec and smart quotes or em dashes
+# crash the YAML loader.
+#
+# PRICES are real, from the operator's HKD list (2026-09-21) at 7.8 HKD/USD,
+# per-1M divided by 1e6. Context windows for the qwen and haiku entries are
+# estimates pending a /models metadata check; a wrong window only trips
+# enable_pre_call_checks, it does not break routing.
+# =============================================================================
+
+model_list:
+  # ---------------------------------------------------------------------
+  # The one model Cursor selects. Every deployment below is a candidate for
+  # the policy plugin; it narrows this list to a single model per request.
+  # ---------------------------------------------------------------------
+  - model_name: cursor-auto
+    litellm_params:
+      model: openai/qwen3-vl-flash
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
+      timeout: 600
+    model_info:
+      supports_vision: true
+      max_input_tokens: 262000
+      input_cost_per_token: 0.000000016
+      output_cost_per_token: 0.00000018
+      cache_read_input_token_cost: 0.0000000016
+      cache_creation_input_token_cost: 0.000000016
+
+  - model_name: cursor-auto
+    litellm_params:
+      model: openai/glm-5.3-flash
+      api_key: os.environ/ROUTER_KEY_DEFAULT
+      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      timeout: 600
+    model_info:
+      supports_vision: true
+      max_input_tokens: 200000
+      input_cost_per_token: 0.0000001
+      output_cost_per_token: 0.00000034
+      cache_read_input_token_cost: 0.00000001
+      cache_creation_input_token_cost: 0.0000001
+
+  - model_name: cursor-auto
+    litellm_params:
+      model: openai/qwen3.8-flash
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
+      timeout: 600
+    model_info:
+      supports_vision: false
+      max_input_tokens: 262000
+      input_cost_per_token: 0.00000012
+      output_cost_per_token: 0.00000038
+      cache_read_input_token_cost: 0.000000012
+      cache_creation_input_token_cost: 0.00000012
+
+  - model_name: cursor-auto
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
+      timeout: 600
+    model_info:
+      supports_vision: false   # text-only: the policy gate never sends it an image
+      max_input_tokens: 128000
+      input_cost_per_token: 0.0000003
+      output_cost_per_token: 0.00000121
+      cache_read_input_token_cost: 0.00000003
+      cache_creation_input_token_cost: 0.0000003
+
+  - model_name: cursor-auto
+    litellm_params:
+      model: openai/kimi-k2.7-code
+      api_key: os.environ/ROUTER_KEY_DEFAULT
+      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      timeout: 600
+    model_info:
+      supports_vision: true
+      max_input_tokens: 262000
+      input_cost_per_token: 0.00000077
+      output_cost_per_token: 0.00000322
+      cache_read_input_token_cost: 0.000000077
+      cache_creation_input_token_cost: 0.00000077
+
+  # glm-5.3 on BOTH keys, one logical candidate. The basic key is the primary
+  # (weight 9); the default key absorbs the rest and takes over if it cools down.
+  # Both deployments share a litellm_params.model string, so the policy's
+  # single pick keeps both and litellm load-balances / fails over between them.
+  - model_name: cursor-auto
+    litellm_params:
+      model: openai/glm-5.3
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
+      timeout: 600
+      weight: 9
+    model_info:
+      supports_vision: false
+      max_input_tokens: 200000
+      input_cost_per_token: 0.00000113
+      output_cost_per_token: 0.00000354
+      cache_read_input_token_cost: 0.000000113
+      cache_creation_input_token_cost: 0.00000113
+
+  - model_name: cursor-auto
+    litellm_params:
+      model: openai/glm-5.3
+      api_key: os.environ/ROUTER_KEY_DEFAULT
+      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      timeout: 600
+      weight: 1
+    model_info:
+      supports_vision: false
+      max_input_tokens: 200000
+      input_cost_per_token: 0.00000113
+      output_cost_per_token: 0.00000354
+      cache_read_input_token_cost: 0.000000113
+      cache_creation_input_token_cost: 0.00000113
+
+  - model_name: cursor-auto
+    litellm_params:
+      model: openai/claude-haiku-4-5
+      api_key: os.environ/ROUTER_KEY_DEFAULT
+      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      timeout: 600
+    model_info:
+      supports_vision: true
+      max_input_tokens: 200000
+      input_cost_per_token: 0.00000101
+      output_cost_per_token: 0.00000503
+      cache_read_input_token_cost: 0.000000101
+      cache_creation_input_token_cost: 0.00000101
+
+  # ---------------------------------------------------------------------
+  # Direct escape hatches. The policy skips a group with fewer than two
+  # distinct models, so these route exactly as named.
+  # ---------------------------------------------------------------------
+  - model_name: glm-5.3
+    litellm_params:
+      model: openai/glm-5.3
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
+      timeout: 600
+      weight: 9
+    model_info:
+      supports_vision: false
+
+  - model_name: glm-5.3
+    litellm_params:
+      model: openai/glm-5.3
+      api_key: os.environ/ROUTER_KEY_DEFAULT
+      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      timeout: 600
+      weight: 1
+    model_info:
+      supports_vision: false
+
+  - model_name: kimi-k2.7-code
+    litellm_params:
+      model: openai/kimi-k2.7-code
+      api_key: os.environ/ROUTER_KEY_DEFAULT
+      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      timeout: 600
+    model_info:
+      supports_vision: true
+
+  - model_name: glm-5.3-flash
+    litellm_params:
+      model: openai/glm-5.3-flash
+      api_key: os.environ/ROUTER_KEY_DEFAULT
+      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      timeout: 600
+    model_info:
+      supports_vision: true
+
+  - model_name: deepseek-v4.1-flash
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
+      timeout: 600
+    model_info:
+      supports_vision: false
+
+  - model_name: qwen3.8-flash
+    litellm_params:
+      model: openai/qwen3.8-flash
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
+      timeout: 600
+    model_info:
+      supports_vision: false
+
+  - model_name: kimi-k3
+    litellm_params:
+      model: openai/kimi-k3
+      api_key: os.environ/ROUTER_KEY_DEFAULT
+      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      timeout: 600
+    model_info:
+      supports_vision: true
+
+  - model_name: qwen3.8-max
+    litellm_params:
+      model: openai/qwen3.8-max
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
+      timeout: 600
+    model_info:
+      supports_vision: false
+
+# ---------------------------------------------------------------------
+# The policy plugin. Resolved relative to this file, so routing_policy.py
+# must sit next to litellm-config.yaml (and be mounted into the container).
+# It MUST name the instance (router_policy), not the class: a class satisfies
+# litellm's Protocol check but then fails on every request.
+# ---------------------------------------------------------------------
+router_settings:
+  plugins:
+    - routing_policy.router_policy
+  num_retries: 2
+  allowed_fails: 2
+  cooldown_time: 60
+  enable_pre_call_checks: true   # drops deployments whose window cannot hold the prompt
+
+# If the policy or the whole group fails, serve from the direct GLM group.
+fallbacks:
+  - cursor-auto: ["glm-5.3"]
+
+litellm_settings:
+  # Cursor sends provider-specific params some upstreams reject.
+  # drop_params silently strips unsupported ones instead of erroring.
+  drop_params: true
+  # Phase 3 reliability hook (review M1/q4: log-and-expose only, NO routing
+  # effect - litellm's own cooldowns handle fast failures). Records upstream
+  # 429/5xx per model to reliability.jsonl for /health and /learned. Inert
+  # when learning is off (POLICY_LEARN=0 or control.json learning_enabled=false).
+  callbacks: [failure_hook.reliability_hook]
+
+general_settings:
+  # Cursor must send this as its "API key". Keeps the proxy closed.
+  master_key: os.environ/LITELLM_MASTER_KEY

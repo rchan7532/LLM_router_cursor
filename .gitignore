@@ -1,0 +1,8 @@
+# Secrets — never let this repo gain git history carrying real keys.
+.env
+
+# Runtime artifacts
+logs/
+__pycache__/
+.pytest_cache/
+*.pyc
