@@ -18,6 +18,13 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Test isolation: point the policy's state at a throwaway directory BEFORE
+# importing routing_policy. Without this, CONTROL defaults to the machine's
+# state dir (%TEMP% on Windows dev boxes), and a learned.json left there by
+# an earlier live/smoke run silently feeds persisted trust and bar biases
+# into unit tests - non-deterministic failures that depend on machine state.
+# Same hardening validate_config.py and test_golden.py already apply.
+os.environ["POLICY_STATE_DIR"] = tempfile.mkdtemp(prefix="policy-tests-")
 os.environ["POLICY_LOG"] = ""  # keep the test run out of the production log
 
 import routing_policy as policy  # noqa: E402
@@ -580,6 +587,56 @@ def _normal_code_edit_followup():
             "report_parser.py that normalizes the column headers before the "
             "row-level parsing kicks in, and the logging calls that record "
             "each rejected row with its source line number")
+
+
+def _kit_generation_prompt():
+    """2026-09-22 incident shape: a kit-generation ask whose payload is a
+    big pasted template. Under the old RAW-text bar this was ask_scale 2+
+    (bar 0.75+) -> only kimi/glm-5.3 cleared -> 44-turn premium lock-in.
+    The instruction alone is short and mechanically templated."""
+    template = "```ts\nexport interface KitModule {\n  name: string;\n  endpoints: string[];\n  seed: Record<string, unknown>;\n}\n\nexport const buildKit = (mod: KitModule): string => JSON.stringify(mod);\n```\n\n"
+    return ("generate the module kit for src/modules/billing following the template, "
+            "include README, openapi spec, seed data and types for each endpoint "
+            + template * 12)
+
+
+def test_fenced_payload_does_not_inflate_the_bar():
+    """The bar and importance read the INSTRUCTION, not the pasted payload."""
+    reset()
+    signature = policy.build_signature(ask(_kit_generation_prompt()))
+    assert signature is not None
+    assert signature.kind == "code_gen"
+    # 12 template blocks * ~90 tokens each would be ask_scale 2+ raw.
+    assert signature.ask_tokens < 400, signature.ask_tokens
+    assert signature.importance == 1
+
+
+def test_premium_pin_must_rejustify_after_ceiling():
+    """2026-09-22 incident, structural half: even with an inflated bar the
+    run must not be unbounded. After PIN_PREMIUM_CEIL turns the premium pin
+    is voided and the model must re-win a fresh decision."""
+    reset()
+    first = Context(ask(_long_high_code_edit()))
+    run(first)
+    served = first.candidate_models[0]
+    assert policy._blended_cost(policy.PROFILES[served]) > policy.PREMIUM_COST
+
+    # Hold the pin through grace, using a followup whose bar keeps every
+    # cheap model OUT (raw-length inflation reproduces the incident shape).
+    for _ in range(policy.PIN_PREMIUM_CEIL):
+        follow = Context(ask(_long_high_code_edit()))
+        run(follow)
+        assert follow.candidate_models[0] == served
+
+    # Next turn: ceiling voids the pin; the fresh decision re-runs. kimi's
+    # utility now competes against the FULL fleet including glm-5.3-flash;
+    # with trust docked by the fresh competition the cheap model wins.
+    follow = Context(ask(_kit_generation_prompt()))
+    run(follow)
+    decision = follow.signals["policy"]
+    assert follow.candidate_models[0] != served or decision["reason"] == "pinned-loyalty"
+    if follow.candidate_models[0] != served:
+        assert decision["reason"] in {"pin-swap", "fresh"}, decision
 
 
 def test_pin_holds_through_grace_then_competes():

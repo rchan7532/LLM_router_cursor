@@ -144,6 +144,14 @@ CASCADE_TRUST_PENALTY = _env_float("POLICY_CASCADE_TRUST_PENALTY", -0.25)
 PIN_GRACE_TURNS = _env_int("POLICY_PIN_GRACE_TURNS", 4)
 PIN_BONUS_START = _env_float("POLICY_PIN_BONUS_START", 0.12)
 PIN_BONUS_FLOOR = _env_float("POLICY_PIN_BONUS_FLOOR", 0.03)
+# Premium run ceiling (2026-09-22 kit-generation incident): a premium model
+# held by session stickiness must be re-justified after this many consecutive
+# turns. The loyalty bonus decays, but when the classifier put the bar above
+# every flash model the "competition" was premium-vs-premium and never
+# produced a cheap winner - kimi ran 44 turns (~73 HKD) that way. The
+# ceiling forces a periodic fresh decision where cost pressure applies to
+# the FULL fleet again. Cheap models are exempt: their pins are the point.
+PIN_PREMIUM_CEIL = _env_int("POLICY_PIN_PREMIUM_CEIL", 10)
 
 # Laya shadow scorer: max additive influence on utility. The control-plane
 # weight is 0..1; it is scaled down so full weight still only nudges.
@@ -426,11 +434,11 @@ PROFILES: dict[str, Profile] = {
         cost_out=0.34,
         latency=0,
         cap={
-            "code_edit": 0.72, "code_gen": 0.58, "refactor": 0.58, "debug": 0.55,
+            "code_edit": 0.72, "code_gen": 0.70, "refactor": 0.58, "debug": 0.55,
             "review": 0.58, "design": 0.50, "explain": 0.80, "bulk": 0.75,
             "writing": 0.75, "factual": 0.82, "agentic": 0.68,
         },
-        strengths=("explain", "factual", "bulk", "code_edit"),
+        strengths=("explain", "factual", "bulk", "code_edit", "code_gen"),
         weak=("design",),
     ),
     "openai/qwen3.8-flash": Profile(
@@ -551,6 +559,12 @@ KIND_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 CODE_FENCE_RE = re.compile(r"```")
+# Fenced-payload stripping (2026-09-22 kit-generation incident): a
+# kit-generation ask is long BECAUSE of its pasted template. Measuring the
+# raw text inflated both ask_tokens (bar scale +3) and the importance read,
+# which is exactly backwards for mechanical expansion work. The router must
+# size the bar and read importance from the INSTRUCTION, not the payload.
+CODE_FENCE_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
 PATH_RE = re.compile(r"[\w./\-]+\.(?:ts|tsx|js|jsx|py|go|rs|java|rb|cs|cpp|c|h|sql|yaml|yml|json|md|sh)\b")
 ERROR_RE = re.compile(r"(traceback \(most recent|error:|exception:|at [\w.$]+\(|panic:)", re.IGNORECASE)
 IMAGE_PART_TYPES = frozenset({"image_url", "image", "input_image"})
@@ -813,6 +827,13 @@ def build_signature(messages: Sequence[Mapping[str, Any]]) -> Signature | None:
         directives.add("cheap")
 
     kind = _detect_kind(ask, est_tokens, has_image)
+    # The instruction text with fenced payload stripped. Kit-generation asks
+    # are long because of a pasted template, not because the instruction is
+    # complex: sizing the bar and reading importance from the RAW text made
+    # mechanical expansion work look premium (2026-09-22 incident, kimi
+    # pinned 44 turns). The whole-thread est_tokens is untouched, so context
+    # fitting and headroom still see the true size.
+    instruction = CODE_FENCE_BLOCK_RE.sub(" ", ask)
     return Signature(
         kind=kind,
         scale=scale,
@@ -823,8 +844,8 @@ def build_signature(messages: Sequence[Mapping[str, Any]]) -> Signature | None:
         directives=frozenset(directives),
         use_model=use_model,
         stall=_detect_stall(messages),
-        importance=_detect_importance(ask, kind, frozenset(directives), est_tokens),
-        ask_tokens=len(ask) // 4,
+        importance=_detect_importance(instruction, kind, frozenset(directives), est_tokens),
+        ask_tokens=len(instruction) // 4,
     )
 
 
@@ -1345,6 +1366,17 @@ class CursorAutoPolicy:
                 if signature.importance == 0 and _blended_cost(held) > PREMIUM_COST:
                     pinned = None
                 elif held.model in cascade_excluded:
+                    pinned = None
+                elif turns_held > PIN_PREMIUM_CEIL and _blended_cost(held) > PREMIUM_COST:
+                    # Premium run ceiling: after PIN_PREMIUM_CEIL consecutive
+                    # turns the held premium model must re-win a FRESH
+                    # decision - grace and the loyalty bonus are void. If the
+                    # bar genuinely requires a premium model, it re-wins and
+                    # the run continues re-justified. If it was only winning
+                    # because every cheap challenger sat below an inflated
+                    # bar, the fresh decision swaps to the cheap model. Cheap
+                    # pins are exempt: keeping them IS the goal, and explicit
+                    # [[use:]] pins never reach this branch at all.
                     pinned = None
                 elif turns_held <= PIN_GRACE_TURNS:
                     # Grace window: the first turns of a pin hold
