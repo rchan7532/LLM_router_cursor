@@ -213,6 +213,60 @@ def test_escalate_never_picks_a_weaker_model():
     assert after >= before, (plain.signals["policy"], strong.signals["policy"])
 
 
+def test_pasted_escalate_mention_does_not_escalate():
+    """2026-09-25 deploy incident: the user pasted Cursor's advice containing
+    'type ESCALATE and I'll route the debugging turn...' as a SUGGESTION. The
+    bare word must not act as a directive; the actual ask is a cheap stage run."""
+    reset()
+    pasted = (
+        "I asked cursor: For the remaining work — running deploy stages (api, web, smoke) "
+        "and any fixes that come up — no model strength is the bottleneck. If we hit a "
+        "nasty deploy failure, type ESCALATE and I'll route the debugging turn to the "
+        "strongest model in the fleet. Run stage api now?"
+    )
+    ctx = Context(ask(pasted))
+    run(ctx)
+    decision = ctx.signals["policy"]
+    assert "escalate" not in decision["directives"], decision
+    assert decision["importance"] != 2, decision
+
+
+def test_bare_escalate_still_escalates():
+    reset()
+    ctx = Context(ask("review the auth bootstrap before we ship. ESCALATE"))
+    run(ctx)
+    assert "escalate" in ctx.signals["policy"]["directives"]
+
+
+def test_quoted_narrative_does_not_force_debug_kind():
+    """The same incident, kind side: 'found 3 bugs' / 'would have blocked the
+    deploy' inside the pasted review must not classify the ask as debug when
+    the ask itself is 'run stage api now?'."""
+    reset()
+    pasted = (
+        "Review of the continuation agent's work is done. Found and fixed 3 bugs: "
+        "SEC-02 would have blocked the deploy, fail-closed env stage, arg validation "
+        "order. Current state: main, clean tree, typecheck + build green. "
+        "Next task when you resume: python scripts/deploy-bcc-cn.py env. "
+        "Run stage api now?"
+    )
+    ctx = Context(ask(pasted))
+    run(ctx)
+    decision = ctx.signals["policy"]
+    assert decision["kind"] != "debug", decision
+
+
+def test_pasted_traceback_with_question_still_debugs():
+    """The interrogative-tail guard must not eat real error pastes: a genuine
+    traceback followed by a question still needs debugging."""
+    reset()
+    messages = ask("what am I doing wrong here?")
+    messages.insert(2, {"role": "user", "content": "Traceback (most recent call last): boom"})
+    ctx = Context(messages)
+    run(ctx)
+    assert ctx.signals["policy"]["kind"] == "debug", ctx.signals["policy"]
+
+
 def test_use_directive_pins_an_exact_model():
     context = Context(ask("quick question [[use:glm-5.3-flash]]"))
     run(context)

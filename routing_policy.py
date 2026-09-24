@@ -529,6 +529,22 @@ PROFILES: dict[str, Profile] = {
 
 DIRECTIVE_RE = re.compile(r"\[\[\s*(escalate|cheap|use:\s*([A-Za-z0-9._\-/]+)|low|high)\s*\]\]", re.IGNORECASE)
 ESCALATE_WORD = "ESCALATE"
+# Escalate-word guarding (2026-09-25 deploy-stage incident): the bare word
+# "ESCALATE" appears in pasted agent advice ("type ESCALATE and I'll route
+# the debugging turn...") and router docs, where it is a SUGGESTION, not an
+# instruction from the user. A bare substring hit must not escalate. It is
+# only honoured when it is the user speaking in first person or a clearly
+# imperative framing, and never when the ask is itself a question about the
+# router or quotes/mentions the directive. The [[escalate]] bracket form is
+# unambiguous and unaffected.
+ESCALATE_NEGATION_RE = re.compile(
+    r"(suggest|suggests|suggested|suggesting|recommend|type\s+escalate"
+    r"|use\s+escalate|with\s+escalate|escalate\s+then|about\s+escalate"
+    r"|of\s+escalate|for\s+escalate|an?\s+escalate|not\s+escalate|no\s+escalate"
+    r"|whether\s+to\s+escalate|if\s+we\s+escalate|escalate\s+the\s+debugging"
+    r"|\[\[escalate\]\]|escalate\b\s*(keyword|directive|word|command))",
+    re.IGNORECASE,
+)
 
 # --------------------------------------------------------------------------
 # Task signatures
@@ -761,11 +777,68 @@ def _detect_importance(ask: str, kind: str, directives: frozenset[str], est_toke
     return 1
 
 
-def _detect_kind(ask: str, est_tokens: int, has_image: bool) -> str:
-    if ERROR_RE.search(ask):
+# Quoted-narrative guard (2026-09-25 deploy-stage incident): when a user
+# pastes an agent's advice or a review summary, the quoted sentences carry
+# debug/review vocabulary ("fails", "fix", "found 3 bugs") that describes
+# PAST or HYPOTHETICAL work, not the ask. Two guards:
+#   1. Attribution strip: sentences that merely report what an agent said or
+#      did (quoted or attributed speech) are removed before kind detection.
+#   2. Interrogative tail: if the ask ENDS in a short question, the question
+#      is the ask; narrative vocabulary above it is context. Error-pastebins
+#      are still honoured (ERROR_RE wins) because a real traceback pasted
+#      into a question-shaped ask still needs debugging.
+QUOTE_ATTRIBUTION_RE = re.compile(
+    r"(?:^|\n)\s*(?:>?|\"|“|')\s*"
+    r"(?:cursor(?:'s)?|the\s+(?:router|agent|subagent|review(?:er)?)|it|this|they|he|she)\b"
+    r"[^:;\n]{0,80}(?:said|wrote|replied|answered|advised|suggested|recommends?|noted|found|added|flagged|reported)"
+    r"[^\n]*",
+    re.IGNORECASE,
+)
+INTERROGATIVE_TAIL_RE = re.compile(r"[^\n?]{0,200}\?\s*$")
+# Report-shape guard: a pasted agent report ("Follow-up review findings",
+# "Current state", "Next task when you resume") is CONTEXT. When it ends in
+# a short question, the question is the ask and the narrative's debug/review
+# vocabulary describes past work, not this request. Keyword scoring then
+# reads only the question tail. Real error pastes bypass this entirely:
+# ERROR_RE is checked before the guard, so "Traceback... what's wrong?"
+# still debugs.
+REPORT_SHAPE_RE = re.compile(
+    r"(follow-up review|review of|findings|fixed and committed|all fixed"
+    r"|current state|next task|blocked on|when you resume|status report"
+    r"|summary of|here is what|here's what|what was done)",
+    re.IGNORECASE,
+)
+
+
+def _strip_quoted_narrative(ask: str) -> str:
+    """Remove attributed/quoted narration lines for KIND detection only.
+
+    The directive scan still runs on the raw text (a directive inside a
+    quote is still usually meant), but kind and importance read the ask
+    minus the narration. Returns the text unchanged when nothing matches.
+    """
+    return QUOTE_ATTRIBUTION_RE.sub("\n", ask)
+
+
+def _detect_kind(ask: str, est_tokens: int, has_image: bool, messages: Sequence[Mapping[str, Any]] | None = None) -> str:
+    instruction = _strip_quoted_narrative(ask)
+    # A real pasted error ALWAYS debugs. Checked on BOTH the marginal ask and
+    # the recent thread: a user who pastes a traceback and then asks "what am
+    # I doing wrong?" has the error one turn back, and that is still a debug
+    # turn (2026-09-25 regression pair).
+    error_context = ask if messages is None else ask + "\n" + "\n".join(
+        _message_text(message.get("content")) for message in messages[-4:]
+    )
+    if ERROR_RE.search(error_context):
         return "debug"
+    # Report-shape guard: pasted agent report + short question tail. The
+    # report's vocabulary (bugs, deploy, review) is about past work; only
+    # the question tail is the ask.
+    tail_match = INTERROGATIVE_TAIL_RE.search(instruction)
+    if tail_match and REPORT_SHAPE_RE.search(instruction):
+        instruction = tail_match.group(0)
     scores: dict[str, float] = {}
-    lowered = ask.lower()
+    lowered = instruction.lower()
     for kind, words in KIND_KEYWORDS.items():
         hits = sum(1 for word in words if word in lowered)
         if hits:
@@ -831,19 +904,20 @@ def build_signature(messages: Sequence[Mapping[str, Any]]) -> Signature | None:
             directives.add("use")
         else:
             directives.add(token.lower())
-    if ESCALATE_WORD in ask:
+    if ESCALATE_WORD in ask and not ESCALATE_NEGATION_RE.search(ask):
         directives.add("escalate")
     if "[[cheap]]" in ask.lower():
         directives.add("cheap")
 
-    kind = _detect_kind(ask, est_tokens, has_image)
-    # The instruction text with fenced payload stripped. Kit-generation asks
-    # are long because of a pasted template, not because the instruction is
-    # complex: sizing the bar and reading importance from the RAW text made
-    # mechanical expansion work look premium (2026-09-22 incident, kimi
-    # pinned 44 turns). The whole-thread est_tokens is untouched, so context
+    kind = _detect_kind(ask, est_tokens, has_image, messages)
+    # The instruction text with fenced payload stripped AND quoted narrative
+    # removed. Kit-generation asks are long because of a pasted template, not
+    # because the instruction is complex; agent-advice pastes are heavy with
+    # debug/review vocabulary that is not the ask. Both skew importance and
+    # the bar when read raw (2026-09-22 kit incident, 2026-09-25 deploy
+    # incident). The whole-thread est_tokens is untouched, so context
     # fitting and headroom still see the true size.
-    instruction = CODE_FENCE_BLOCK_RE.sub(" ", ask)
+    instruction = CODE_FENCE_BLOCK_RE.sub(" ", _strip_quoted_narrative(ask))
     return Signature(
         kind=kind,
         scale=scale,
