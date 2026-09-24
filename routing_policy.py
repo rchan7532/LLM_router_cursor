@@ -152,6 +152,16 @@ PIN_BONUS_FLOOR = _env_float("POLICY_PIN_BONUS_FLOOR", 0.03)
 # ceiling forces a periodic fresh decision where cost pressure applies to
 # the FULL fleet again. Cheap models are exempt: their pins are the point.
 PIN_PREMIUM_CEIL = _env_int("POLICY_PIN_PREMIUM_CEIL", 10)
+# Per-(model, task-kind) spend alarm. When one model has been used for >=
+# this many HKD on one kind inside a session, subsequent same-kind turns in
+# that session are forced to the cheapest capable model until the alarm is
+# cleared. A soft pause: the router keeps serving, but it stops the runaway.
+KIND_ALARM_HKD = _env_float("POLICY_KIND_ALARM_HKD", 20.0)
+# How long an alarm epoch survives without a live control-plane clear. If
+# the control service increments the alarm_epoch we remember it here; old
+# in-memory alarms are dropped when the epoch advances. A manual clear also
+# bumps the epoch so every proxy forgets its stale alarms on the next read.
+KIND_ALARM_TTL_S = _env_float("POLICY_KIND_ALARM_TTL_S", 30.0)
 
 # Laya shadow scorer: max additive influence on utility. The control-plane
 # weight is 0..1; it is scaled down so full weight still only nudges.
@@ -923,6 +933,12 @@ class PolicyState:
         # {"model": ..., "expires_ts": ...} or None. The moment it reads as
         # expired, sessions pinned to its model are dropped (review B5).
         self.last_lease: dict[str, Any] | None = None
+        # Per-session per-(model, kind) spend alarm state.
+        # kind_alarms[session_key][(model, kind)] = {"spend_hkd": x, "ts": t}
+        # Triggered when spend_hkd >= KIND_ALARM_HKD. A global alarm_epoch is
+        # read from the control plane; stale epochs clear in-memory alarms.
+        self.kind_alarms: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
+        self.alarm_epoch: int = 0
 
     def session_spend(self, session_key: str | None) -> float:
         """Estimated cumulative spend for this session from the decision log.
@@ -979,6 +995,14 @@ class PolicyState:
         for key, value in list(self.sessions.items()):
             if now - value["ts"] > SESSION_TTL:
                 self.sessions.pop(key, None)
+        # Alarms also TTL to bound memory; a long-stale session's alarms
+        # are useless and would otherwise leak under heavy use.
+        for key, value in list(self.kind_alarms.items()):
+            for alarm_key, alarm in list(value.items()):
+                if now - alarm["ts"] > SESSION_TTL:
+                    value.pop(alarm_key, None)
+            if not value:
+                self.kind_alarms.pop(key, None)
 
     def trust_of(self, kind: str, model: str) -> float:
         return self.trust.get((kind, model), 0.0)
@@ -1407,6 +1431,42 @@ class CursorAutoPolicy:
         # only control that would have stopped the user's 162 HKD hour:
         # importance routing already chose the right model per turn, but the
         # sheer volume of ~130k-token turns on premium models still added up.
+        # ---- per-(model, kind) spend alarm -------------------------------
+        # A single model-kind pair burning >= KIND_ALARM_HKD in one session
+        # is treated like a runaway. The alarm is stored in RAM per session;
+        # the control plane can broadcast an alarm_epoch bump to clear all
+        # proxies' stale alarms at once (e.g. via MCP router_kind_alarm_clear).
+        # The alarm only fires when the CURRENT turn is the same kind as the
+        # runaway pair; a debug turn after a code_gen runaway should still be
+        # routed normally so the user can investigate.
+        kind_alarm_active = False
+        kind_alarm_model: str | None = None
+        if (
+            session_key
+            and previous
+            and isinstance(previous.get("model"), str)
+            and isinstance(previous.get("kind"), str)
+            and previous["kind"] == signature.kind
+        ):
+            previous_pair = (previous["model"], previous["kind"])
+            session_alarms = STATE.kind_alarms.get(session_key, {})
+            alarm_record = session_alarms.get(previous_pair)
+            if alarm_record is not None and alarm_record.get("epoch", 0) >= STATE.alarm_epoch:
+                if time.time() - alarm_record["ts"] < KIND_ALARM_TTL_S:
+                    kind_alarm_active = True
+                    kind_alarm_model = previous["model"]
+
+        # Sync alarm_epoch from the control plane if it is configured. A
+        # manual clear bumps the epoch; any in-memory alarm with a lower
+        # epoch is immediately forgotten. No new persistent file is needed.
+        if CONTROL is not None:
+            try:
+                live_epoch = CONTROL.alarm_epoch()
+                if isinstance(live_epoch, int) and live_epoch > STATE.alarm_epoch:
+                    STATE.alarm_epoch = live_epoch
+            except Exception:  # noqa: BLE001
+                pass
+
         budget = None
         if CONTROL is not None:
             try:
@@ -1489,10 +1549,11 @@ class CursorAutoPolicy:
                         reason = "pin-swap"
             if winner is pinned and reason == "fresh":
                 reason = "pinned-loyalty"
-        elif budget_breached:
+        elif budget_breached or kind_alarm_active:
             # Force the cheapest model that still clears the capability gate.
             # We keep the same gate/bar so safety is preserved; we just pick
-            # by cost instead of utility.
+            # by cost instead of utility. This path is shared by the global
+            # session budget cap and the per-(model, kind) spend alarm.
             capable = [
                 profile for profile in known
                 if (not signature.has_image or profile.vision)
@@ -1516,7 +1577,7 @@ class CursorAutoPolicy:
                 cascade_fallback = True
             capable.sort(key=_blended_cost)
             winner = capable[0] if capable else known[0]
-            reason = "budget-cap"
+            reason = "budget-cap" if budget_breached else "kind-alarm"
             for profile in known:
                 scored.append(
                     Candidate(profile=profile, capability=profile.cap.get(signature.kind, 0.5),
@@ -1567,6 +1628,20 @@ class CursorAutoPolicy:
                 "ask": signature.text,
                 "spend_hkd": session_spend + turn_cost,
             }
+            # Update per-(model, kind) spend alarm. Only the previous turn's
+            # model-kind pair is charged; the winner of THIS turn is charged
+            # on the NEXT turn (when it becomes "previous"). This avoids
+            # double-counting and keeps the alarm aligned with continuity.
+            if previous and isinstance(previous.get("model"), str) and isinstance(previous.get("kind"), str):
+                pair = (previous["model"], previous["kind"])
+                session_alarms = STATE.kind_alarms.setdefault(session_key, {})
+                alarm = session_alarms.setdefault(pair, {"spend_hkd": 0.0, "ts": time.time(), "epoch": STATE.alarm_epoch})
+                alarm["spend_hkd"] += _estimate_cost_hkd(
+                    signature,  # use the marginal ask being served now
+                    PROFILES[previous["model"]],
+                )
+                alarm["ts"] = time.time()
+                alarm["epoch"] = STATE.alarm_epoch
             _remember_session(session_key, signature.text)
 
         context.signals["policy"] = {
@@ -1587,6 +1662,8 @@ class CursorAutoPolicy:
             "spend_hkd": round(STATE.session_spend(session_key), 4),
             "budget_hkd": budget,
             "budget_alarm": budget_breached,
+            "kind_alarm": kind_alarm_active,
+            "kind_alarm_model": kind_alarm_model,
             "lease": lease.get("model") if lease is not None else None,
             "weights": {"cost": weights[0], "trust": weights[1],
                         "headroom": weights[2], "latency": weights[3]},
@@ -1621,6 +1698,8 @@ class CursorAutoPolicy:
                 "spend_hkd": round(STATE.session_spend(session_key), 4),
                 "budget_hkd": budget,
                 "budget_alarm": budget_breached,
+                "kind_alarm": kind_alarm_active,
+                "kind_alarm_model": kind_alarm_model,
                 "has_image": signature.has_image,
                 "stall": signature.stall,
                 "directives": sorted(signature.directives),

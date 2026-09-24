@@ -23,7 +23,9 @@
     td.reason.lease { color: #f28b82; }
     td.reason.budget-cap { color: #f28b82; font-weight: 600; }
     td.reason.pin-swap { color: #fdd663; font-weight: 600; }
+    td.reason.kind-alarm { color: #f28b82; font-weight: 600; }
     tr.alarm td { background: #3e1c1c; }
+    tr.kind-alarm td { background: #2a1c3e; }
     tr.alarm:hover td { background: #4f2424; }
     td.candidates { max-width: 18rem; overflow: hidden; text-overflow: ellipsis; }
     tr:hover td { background: #1a1d23; }
@@ -130,14 +132,19 @@
       let reasonClass = '';
       if (r.reason && r.reason.startsWith('lease')) reasonClass = 'lease';
       if (r.reason === 'budget-cap') reasonClass = 'budget-cap';
+      if (r.reason === 'kind-alarm') reasonClass = 'kind-alarm';
       if (r.reason === 'pin-swap') reasonClass = 'pin-swap';
       if (r.budget_alarm) tr.classList.add('alarm');
+      if (r.kind_alarm) tr.classList.add('kind-alarm');
       const candidates = (r.candidates || []).map(modelShort).join(', ');
       const imp = r.importance;
       const impLabel = imp === 0 ? 'Low' : imp === 2 ? 'High' : 'Normal';
       const impClass = imp === 0 ? 'imp-low' : imp === 2 ? 'imp-high' : 'imp-normal';
       const spend = r.spend_hkd != null ? r.spend_hkd.toFixed(2) : '—';
       const budgetCell = budget != null ? `${spend} / ${budget.toFixed(2)}` : spend;
+      const alarmCell = r.kind_alarm && r.kind_alarm_model
+        ? `${budgetCell} (alarm: ${modelShort(r.kind_alarm_model)})`
+        : budgetCell;
       tr.innerHTML = `
         <td class="ts">${fmtTime(r.ts)}</td>
         <td class="chosen">${modelShort(r.chosen)}</td>
@@ -146,7 +153,7 @@
         <td class="reason ${reasonClass}">${r.reason || '—'}</td>
         <td>${r.scale ?? '—'}</td>
         <td class="cost">${r.est_cost_hkd != null ? r.est_cost_hkd.toFixed(3) : '—'}</td>
-        <td>${budgetCell}</td>
+        <td>${alarmCell}</td>
         <td>${(r.directives || []).map(d => `<span class="badge">${d}</span>`).join(' ') || '—'}</td>
         <td>${r.lease ? modelShort(r.lease.model) : '—'}</td>
         <td>${(r.session || '').slice(0, 8)}</td>

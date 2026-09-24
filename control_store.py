@@ -294,6 +294,13 @@ class ControlStore:
                 return float(value)
         return None
 
+    def alarm_epoch(self) -> int | None:
+        """Global alarm epoch. Bumping this in control.json makes every proxy
+        drop its stale per-(model, kind) alarms on the next read."""
+        self._refresh_control()
+        value = self._control.get("alarm_epoch")
+        return int(value) if isinstance(value, int) else None
+
     def control_snapshot(self) -> dict[str, Any]:
         """Raw view for diagnostics; never used for decisions."""
         self._refresh_control()

@@ -202,6 +202,14 @@ TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "router_kind_alarm_clear",
+        "description": "Clear the per-(model, task-kind) spend alarm. When one model "
+        "has burned more than the configured threshold (default 20 HKD) on one task kind "
+        "inside the current session, the router forces that session to the cheapest capable "
+        "model. Call this after reviewing the runaway to resume normal routing.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
 ]
 
 
@@ -243,6 +251,8 @@ def _call_tool(name: str, args: Mapping[str, Any]) -> dict[str, Any]:
         if "hkd" in args:
             return _request("POST", "/budget", {"hkd": args["hkd"]})
         return {"error": "pass hkd or clear", "ok": False}
+    if name == "router_kind_alarm_clear":
+        return _request("POST", "/alarm/clear", {})
     return {"error": f"unknown tool {name!r}", "ok": False}
 
 

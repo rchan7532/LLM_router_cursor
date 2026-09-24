@@ -199,6 +199,16 @@ def clear_budget() -> dict[str, Any]:
         return _save_control(control)
 
 
+def bump_alarm_epoch() -> dict[str, Any]:
+    """Increment the global alarm epoch. Every proxy drops stale per-(model,
+    kind) alarms on its next control.json read. This is the control-plane
+    clear for the kind-alarm fail-safe."""
+    with _WRITE_LOCK:
+        control = _load_control()
+        control["alarm_epoch"] = int(control.get("alarm_epoch", 0)) + 1
+        return _save_control(control)
+
+
 def _load_learned() -> dict[str, Any]:
     try:
         with open(LEARNED_PATH, encoding="utf-8") as handle:
@@ -277,6 +287,7 @@ def health() -> dict[str, Any]:
         "weights": control.get("weights"),
         "revision": int(control.get("revision", 0)),
         "budget_hkd": control.get("budget_hkd"),
+        "alarm_epoch": int(control.get("alarm_epoch", 0)),
         "laya_weight": (control.get("weights") or {}).get("laya"),
         "decisions_present": os.path.exists(DECISIONS_PATH),
         "learned_present": os.path.exists(LEARNED_PATH),
@@ -442,6 +453,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("budget needs {hkd} or {clear: true}")
             if parsed.path == "/reset/learned":
                 self._send(200, reset_learned(str(body.get("scope", "all"))))
+                return
+            if parsed.path == "/alarm/clear":
+                self._send(200, bump_alarm_epoch())
                 return
             self._send(404, {"error": "not found"})
         except ValueError as error:
