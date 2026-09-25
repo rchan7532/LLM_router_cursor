@@ -79,7 +79,11 @@ services:
     ports:
       - "127.0.0.1:4010:4010"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4010/health', timeout=5).status == 200 else 1)\""]
+      # The service authenticates EVERY request (review m3), /health
+      # included, so the healthcheck must send the token it already has in
+      # its environment. Without this the container reads "unhealthy" while
+      # working perfectly.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,os,sys; r=urllib.request.Request('http://127.0.0.1:4010/health', headers={'Authorization': 'Bearer ' + os.environ.get('CONTROL_TOKEN','')}); sys.exit(0 if urllib.request.urlopen(r, timeout=5).status == 200 else 1)\""]
       interval: 30s
       timeout: 10s
       retries: 3
