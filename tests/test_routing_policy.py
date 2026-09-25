@@ -213,6 +213,83 @@ def test_escalate_never_picks_a_weaker_model():
     assert after >= before, (plain.signals["policy"], strong.signals["policy"])
 
 
+def _agent_turn(text, n_tool_calls=2):
+    """The same human ask driving an agent loop: assistant turns with tool
+    calls after it (varying arguments so the stall detector stays quiet)."""
+    messages = ask(text)
+    for i in range(n_tool_calls):
+        messages.insert(-1, {
+            "role": "assistant",
+            "tool_calls": [{"function": {"name": "read_file",
+                                         "arguments": "{\"path\":\"src/mod%d.ts\"}" % i}}],
+        })
+    return messages
+
+
+def test_stale_design_ask_demotes_to_execution_phase():
+    """2026-09-25 complaint: a design ask correctly routes turn 1 to
+    glm-5.3, but the agent loop then re-reads the SAME ask every turn, so
+    30+ mechanical follow-through turns also pay premium. After
+    EXEC_PHASE_TURNS turns the stale ask demotes to agentic/Normal and a
+    flash model takes over."""
+    reset()
+    first = Context(ask("design the sync layer for offline mode"))
+    run(first)
+    assert first.signals["policy"]["kind"] == "design"
+    served = first.candidate_models[0]
+    assert policy._blended_cost(policy.PROFILES[served]) > policy.PREMIUM_COST
+
+    # Turns 2..EXEC_PHASE_TURNS: same ask, tool activity, pin holds premium.
+    for _ in range(policy.EXEC_PHASE_TURNS - 1):
+        ctx = Context(_agent_turn("design the sync layer for offline mode"))
+        run(ctx)
+        assert ctx.signals["policy"]["exec_demoted"] is False, ctx.signals["policy"]
+        assert ctx.candidate_models[0] == served
+
+    # One turn later: the ask has driven enough turns with tools -> demoted,
+    # the pin breaks (design != agentic) and a cheap model wins fresh.
+    ctx = Context(_agent_turn("design the sync layer for offline mode"))
+    run(ctx)
+    decision = ctx.signals["policy"]
+    assert decision["exec_demoted"] is True, decision
+    assert decision["kind"] == "agentic", decision
+    assert policy._blended_cost(policy.PROFILES[ctx.candidate_models[0]]) < policy.PREMIUM_COST
+
+    # The demotion is sticky too: the next same-ask turn stays in exec phase.
+    ctx2 = Context(_agent_turn("design the sync layer for offline mode"))
+    run(ctx2)
+    assert ctx2.signals["policy"]["exec_demoted"] is True
+    assert ctx2.candidate_models[0] == ctx.candidate_models[0]
+
+
+def test_demotion_resets_on_a_fresh_ask():
+    reset()
+    for _ in range(policy.EXEC_PHASE_TURNS + 2):
+        ctx = Context(_agent_turn("design the sync layer for offline mode"))
+        run(ctx)
+    assert ctx.signals["policy"]["exec_demoted"] is True
+    # A NEW human ask is not stale: normal classification resumes.
+    fresh = Context(_agent_turn("design the retry policy for the webhook queue"))
+    run(fresh)
+    assert fresh.signals["policy"]["exec_demoted"] is False
+    assert fresh.signals["policy"]["kind"] == "design"
+
+
+def test_demotion_blocked_by_directive_and_needs_tool_activity():
+    reset()
+    # Enough turns, but a directive says the user wants the premium path.
+    for _ in range(policy.EXEC_PHASE_TURNS + 1):
+        ctx = Context(_agent_turn("design the sync layer for offline mode"))
+        run(ctx)
+    pinned = Context(_agent_turn("design the sync layer for offline mode [[high]]"))
+    run(pinned)
+    assert pinned.signals["policy"]["exec_demoted"] is False
+    # No tool calls: a plain repeated chat question is not an agent loop.
+    no_tools = Context(ask("design the sync layer for offline mode"))
+    run(no_tools)
+    assert no_tools.signals["policy"]["exec_demoted"] is False
+
+
 def test_pasted_escalate_mention_does_not_escalate():
     """2026-09-25 deploy incident: the user pasted Cursor's advice containing
     'type ESCALATE and I'll route the debugging turn...' as a SUGGESTION. The

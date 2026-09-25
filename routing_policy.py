@@ -157,6 +157,20 @@ PIN_PREMIUM_CEIL = _env_int("POLICY_PIN_PREMIUM_CEIL", 10)
 # that session are forced to the cheapest capable model until the alarm is
 # cleared. A soft pause: the router keeps serving, but it stops the runaway.
 KIND_ALARM_HKD = _env_float("POLICY_KIND_ALARM_HKD", 20.0)
+# Stale-ask execution demotion (2026-09-25 design-pin complaint): in an agent
+# loop the newest human ask does not change while the agent works, so a
+# design-shaped ask re-classifies as `design` on EVERY turn and the premium
+# bar that was right for "identify the problem" also gates the 30 mechanical
+# follow-through turns. Once the SAME ask has driven this many turns WITH
+# tool activity, the decision is made and the remaining work is execution:
+# re-signature the turn as agentic at Normal importance with no ask-scale so
+# flash models clear the bar. A fresh human message, any directive, or a
+# non-planning kind all skip or reset it. If the cheap model then stalls or
+# fails, stall detection and cascade-lite raise the bar back - the safety
+# net for a wrong demotion is one bad turn, not a bad session.
+EXEC_PHASE_TURNS = _env_int("POLICY_EXEC_PHASE_TURNS", 8)
+EXEC_PHASE_KINDS = frozenset({"design", "refactor", "debug", "review"})
+EXEC_PHASE_KIND = "agentic"
 # How long an alarm epoch survives without a live control-plane clear. If
 # the control service increments the alarm_epoch we remember it here; old
 # in-memory alarms are dropped when the epoch advances. A manual clear also
@@ -1314,6 +1328,36 @@ class CursorAutoPolicy:
 
         previous = STATE.sessions.get(session_key) if session_key else None
 
+        # ---- stale-ask execution demotion --------------------------------
+        # The newest human ask has driven >= EXEC_PHASE_TURNS turns with tool
+        # activity: the planning decision is made, the loop is now executing
+        # it. Re-signature the turn as agentic/Normal with no ask-scale so
+        # flash models clear the bar. Fresh asks, directives and non-planning
+        # kinds are untouched; stall/cascade re-escalate if flash struggles.
+        exec_demoted = False
+        if (
+            previous
+            and not signature.directives
+            and signature.kind in EXEC_PHASE_KINDS
+            and signature.tool_fanout > 0
+            and int(previous.get("turns", 0) or 0) >= EXEC_PHASE_TURNS
+            and previous.get("ask") == signature.text
+        ):
+            signature = Signature(
+                kind=EXEC_PHASE_KIND,
+                scale=signature.scale,
+                est_tokens=signature.est_tokens,
+                has_image=signature.has_image,
+                tool_fanout=signature.tool_fanout,
+                text=signature.text,
+                directives=signature.directives,
+                use_model=signature.use_model,
+                stall=signature.stall,
+                importance=min(signature.importance, 1),
+                ask_tokens=min(signature.ask_tokens, 399),  # ask_scale 0
+            )
+            exec_demoted = True
+
         lease = None
         lease_profile: Profile | None = None
         if CONTROL is not None:
@@ -1525,10 +1569,14 @@ class CursorAutoPolicy:
             previous_pair = (previous["model"], previous["kind"])
             session_alarms = STATE.kind_alarms.get(session_key, {})
             alarm_record = session_alarms.get(previous_pair)
-            if alarm_record is not None and alarm_record.get("epoch", 0) >= STATE.alarm_epoch:
-                if time.time() - alarm_record["ts"] < KIND_ALARM_TTL_S:
-                    kind_alarm_active = True
-                    kind_alarm_model = previous["model"]
+            if (
+                alarm_record is not None
+                and alarm_record.get("epoch", 0) >= STATE.alarm_epoch
+                and float(alarm_record.get("spend_hkd", 0.0)) >= KIND_ALARM_HKD
+                and time.time() - alarm_record["ts"] < KIND_ALARM_TTL_S
+            ):
+                kind_alarm_active = True
+                kind_alarm_model = previous["model"]
 
         # Sync alarm_epoch from the control plane if it is configured. A
         # manual clear bumps the epoch; any in-memory alarm with a lower
@@ -1744,6 +1792,7 @@ class CursorAutoPolicy:
             "cascade": cascade_info if cascade_info.get("excluded") or cascade_info.get("penalized_model") else None,
             "cascade_fallback": cascade_fallback,
             "pin_held": pin_held,
+            "exec_demoted": exec_demoted,
             "laya_weight": round(laya_weight, 4),
             "laya_scores": laya_scores if laya_scores else None,
             "scores": [
@@ -1783,6 +1832,7 @@ class CursorAutoPolicy:
                 "cascade": cascade_info if cascade_info.get("excluded") or cascade_info.get("penalized_model") else None,
                 "cascade_fallback": cascade_fallback,
                 "pin_held": pin_held,
+                "exec_demoted": exec_demoted,
                 "laya_weight": round(laya_weight, 4),
                 "laya_scores": laya_scores if laya_scores else None,
                 # Learner telemetry piggybacked on the log (review M6): the
