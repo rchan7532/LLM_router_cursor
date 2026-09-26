@@ -6,3 +6,8 @@ logs/
 __pycache__/
 .pytest_cache/
 *.pyc
+
+# Aider session state only — .aider.conf.yml IS committed (it pins the
+# model/plan files for every future session)
+.aider*
+!.aider.conf.yml

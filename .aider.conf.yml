@@ -1,0 +1,32 @@
+# Aider configuration — llm-router repo
+# Docs: https://aider.chat/docs/config.html
+# Env (set in your shell before launch, NOT here — secrets never go in git):
+#   OPENAI_API_BASE = https://router.ifmphk.com/24b8fa195657da6bc97495e5e28051b304bded55446933a5/v1
+#   OPENAI_API_KEY  = <ROUTER_KEY_DEFAULT from the VPS .env>
+
+model: openai/cursor-auto
+
+# Review each diff before it lands; commit manually with the task tag.
+auto-commits: false
+auto-top-add: false
+
+# The plan + spec drive the work; keep them read-only so aider edits code, not its own instructions.
+read: docs/plans/2026-09-27-task-tag-harness-measurement-plan.md
+read: docs/specs/2026-09-27-task-tag-harness-measurement-design.md
+
+# Keep edits focused on the task-tag feature files (plan Tasks 1-4).
+# Task 5 is verification only - no source changes expected.
+edit-format: diff
+
+# Repo-map off: this repo is small (~20 source files) and the plan already
+# names exact paths per task; the map just spends tokens.
+map-tokens: 0
+
+# Attribute every aider session in router receipts (the User-Agent already
+# contains "aider"; this keeps the attribution stable if the agent string changes).
+attribute-author: aider
+
+# Show the diff before each manual commit prompt.
+# (default behavior; listed so future readers know the workflow)
+# No other git settings: commits stay manual so the [[task:task-tag-measurement]]
+# tag is applied by you per commit.
