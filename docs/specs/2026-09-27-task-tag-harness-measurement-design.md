@@ -64,9 +64,10 @@ friction; front-loads machinery the measure-only phase does not need).
 - `UsageView` gains `task_hkd: dict[(slug, client), float]`, parsed from the
   aggregate, mtime-cached like the existing fields.
 - Control `GET /usage` gains `by_task`:
-  `{slug: {client: {calls, real_hkd}}}` — calls come from counting receipt
-  lines in `routing_usage.jsonl` (the aggregate only stores HKD), real HKD
-  from the aggregate.
+  `{slug: {client: {calls, real_hkd, est_hkd}}}` — computed by `usage_summary`
+  from the same receipt lines as `by_model` / `by_client` (the aggregate is
+  TTL'd and session-capped, so receipt lines are the consistent source for
+  both the call counts and the HKD over the requested window).
 - **Redo detector:** a slug observed under ≥ 2 distinct clients within the
   current receipt file (`routing_usage.jsonl`; the rotated `.1` file is not
   consulted) is surfaced in `/usage`'s summary as `task_redo: [slug…]`.
