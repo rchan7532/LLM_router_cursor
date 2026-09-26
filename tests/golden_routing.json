@@ -271,7 +271,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     },
@@ -347,7 +347,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     }
@@ -665,7 +665,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     },
@@ -741,7 +741,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     }
@@ -1059,7 +1059,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     },
@@ -1135,7 +1135,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     }
@@ -1453,7 +1453,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     },
@@ -1529,7 +1529,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     }
@@ -1847,7 +1847,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     },
@@ -1923,7 +1923,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     }
@@ -2241,7 +2241,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     },
@@ -2317,7 +2317,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     }
@@ -2635,7 +2635,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     },
@@ -2711,7 +2711,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     }
@@ -3029,7 +3029,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     },
@@ -3105,7 +3105,7 @@
      "kind": "debug",
      "laya_scores": null,
      "laya_weight": 0.0,
-     "reason": "pinned-loyalty",
+     "reason": "fresh",
      "scale": 0,
      "stall": 0
     }

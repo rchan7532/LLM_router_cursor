@@ -24,6 +24,10 @@
     td.reason.budget-cap { color: #f28b82; font-weight: 600; }
     td.reason.pin-swap { color: #fdd663; font-weight: 600; }
     td.reason.kind-alarm { color: #f28b82; font-weight: 600; }
+    td.client { color: #9aa0a6; font-size: .78rem; }
+    td.actual { font-variant-numeric: tabular-nums; color: #81c995; }
+    .spend-summary { font-size: .8rem; color: #9aa0a6; margin: .25rem 0 .75rem; line-height: 1.5; }
+    .actual-total { color: #81c995; font-weight: 600; }
     tr.alarm td { background: #3e1c1c; }
     tr.kind-alarm td { background: #2a1c3e; }
     tr.alarm:hover td { background: #4f2424; }
@@ -50,17 +54,20 @@
   </div>
   <div id="status">Waiting for token.</div>
   <div id="error"></div>
+  <div id="spend-summary" class="spend-summary" hidden></div>
   <table id="decisions" hidden>
     <thead>
       <tr>
         <th>Time</th>
         <th>Chosen</th>
+        <th>Client</th>
         <th>Kind</th>
         <th>Importance</th>
         <th>Reason</th>
         <th>Scale</th>
         <th>Est. HKD</th>
-        <th>Session spend</th>
+        <th>Session est</th>
+        <th>Session actual</th>
         <th>Directives</th>
         <th>Lease</th>
         <th>Session</th>
@@ -99,17 +106,22 @@
     const base = new URL('.', window.location.href).href.replace(/\/$/, '').replace(/\/dashboard$/, '');
     const decisionsUrl = `${base}/decisions?n=50`;
     const healthUrl = `${base}/health`;
+    const usageUrl = `${base}/usage`;
     try {
-      const [decRes, healthRes] = await Promise.all([
+      const [decRes, healthRes, usageRes] = await Promise.all([
         fetch(decisionsUrl, { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch(healthUrl, { headers: { 'Authorization': `Bearer ${token}` } }),
+        fetch(usageUrl, { headers: { 'Authorization': `Bearer ${token}` } }),
       ]);
       if (decRes.status === 401) throw new Error('Unauthorized — wrong CONTROL_TOKEN');
       if (!decRes.ok) throw new Error(`HTTP ${decRes.status}: ${await decRes.text()}`);
       const data = await decRes.json();
       let health = {};
       if (healthRes.ok) health = await healthRes.json();
-      render(data.decisions || [], health);
+      let usage = {};
+      if (usageRes.ok) usage = await usageRes.json();
+      render(data.decisions || [], health, usage);
+      renderSummary(usage.summary);
       status.innerHTML = `Connected. <span class="live">●</span> ` +
         (health.budget_hkd != null ? `Budget cap: ${health.budget_hkd.toFixed(2)} HKD. ` : 'No budget cap. ') +
         `Refresh the page any time.`;
@@ -121,12 +133,13 @@
     }
   }
 
-  function render(rows, health) {
+  function render(rows, health, usage) {
     tbody.innerHTML = '';
     if (!rows.length) { table.hidden = true; empty.hidden = false; return; }
     table.hidden = false;
     empty.hidden = true;
     const budget = health.budget_hkd;
+    const sessions = (usage && usage.sessions) || {};
     rows.slice().reverse().forEach(r => {
       const tr = document.createElement('tr');
       let reasonClass = '';
@@ -136,30 +149,58 @@
       if (r.reason === 'pin-swap') reasonClass = 'pin-swap';
       if (r.budget_alarm) tr.classList.add('alarm');
       if (r.kind_alarm) tr.classList.add('kind-alarm');
-      const candidates = (r.candidates || []).map(modelShort).join(', ');
       const imp = r.importance;
       const impLabel = imp === 0 ? 'Low' : imp === 2 ? 'High' : 'Normal';
       const impClass = imp === 0 ? 'imp-low' : imp === 2 ? 'imp-high' : 'imp-normal';
       const spend = r.spend_hkd != null ? r.spend_hkd.toFixed(2) : '—';
       const budgetCell = budget != null ? `${spend} / ${budget.toFixed(2)}` : spend;
       const alarmCell = r.kind_alarm && r.kind_alarm_model
-        ? `${budgetCell} (alarm: ${modelShort(r.kind_alarm_model)})`
+        ? `${budgetCell} (alarm${r.kind_alarm_basis === 'real' ? '!' : ''}: ${modelShort(r.kind_alarm_model)})`
         : budgetCell;
+      // Session actual: the receipt-based total the hook accumulates per
+      // session (usage_state.json); pre-feature rows show r.real_spend_hkd
+      // if present, else dash until a receipt lands for the session.
+      const sess = sessions[r.session];
+      const realTotal = sess && sess.real_hkd != null
+        ? Number(sess.real_hkd).toFixed(2)
+        : (r.real_spend_hkd != null && r.real_spend_hkd > 0 ? Number(r.real_spend_hkd).toFixed(2) : '—');
       tr.innerHTML = `
         <td class="ts">${fmtTime(r.ts)}</td>
         <td class="chosen">${modelShort(r.chosen)}</td>
+        <td class="client">${r.client || '?'}</td>
         <td class="kind">${r.kind || '—'}</td>
         <td class="${impClass}">${r.importance != null ? impLabel : '—'}</td>
         <td class="reason ${reasonClass}">${r.reason || '—'}</td>
         <td>${r.scale ?? '—'}</td>
         <td class="cost">${r.est_cost_hkd != null ? r.est_cost_hkd.toFixed(3) : '—'}</td>
         <td>${alarmCell}</td>
+        <td class="actual">${realTotal}</td>
         <td>${(r.directives || []).map(d => `<span class="badge">${d}</span>`).join(' ') || '—'}</td>
         <td>${r.lease ? modelShort(r.lease.model) : '—'}</td>
         <td>${(r.session || '').slice(0, 8)}</td>
       `;
       tbody.appendChild(tr);
     });
+  }
+
+  function renderSummary(summary) {
+    const el = document.getElementById('spend-summary');
+    if (!summary || !summary.present) { el.hidden = true; el.innerHTML = ''; return; }
+    el.hidden = false;
+    const parts = [];
+    parts.push(`Receipts: ${summary.count} calls · ` +
+      `<span class="actual-total">actual ${summary.real_hkd.toFixed(2)} HKD</span> ` +
+      `vs estimate ${summary.est_hkd.toFixed(2)} HKD ` +
+      `(cached ${((summary.cached_tokens || 0) / 1000).toFixed(0)}k of ${((summary.prompt_tokens || 0) / 1000).toFixed(0)}k prompt tok)`);
+    const clients = Object.entries(summary.by_client || {})
+      .sort((a, b) => b[1].real_hkd - a[1].real_hkd)
+      .map(([c, v]) => `${c} ${v.real_hkd.toFixed(2)}`);
+    if (clients.length) parts.push('By client: ' + clients.join(' · '));
+    const models = Object.entries(summary.by_model || {})
+      .sort((a, b) => b[1].real_hkd - a[1].real_hkd).slice(0, 7)
+      .map(([m, v]) => `${modelShort(m)} ${v.real_hkd.toFixed(2)}`);
+    if (models.length) parts.push('By model: ' + models.join(' · '));
+    el.innerHTML = parts.join('<br>');
   }
 
   document.getElementById('load').addEventListener('click', load);

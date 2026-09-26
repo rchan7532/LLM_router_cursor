@@ -24,7 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # an earlier live/smoke run silently feeds persisted trust and bar biases
 # into unit tests - non-deterministic failures that depend on machine state.
 # Same hardening validate_config.py and test_golden.py already apply.
-os.environ["POLICY_STATE_DIR"] = tempfile.mkdtemp(prefix="policy-tests-")
+_POLICY_TEST_STATE_DIR = tempfile.mkdtemp(prefix="policy-tests-")
+os.environ["POLICY_STATE_DIR"] = _POLICY_TEST_STATE_DIR
 os.environ["POLICY_LOG"] = ""  # keep the test run out of the production log
 
 import routing_policy as policy  # noqa: E402
@@ -62,11 +63,15 @@ def reset():
     policy.STATE.trust.clear()
     failure_hook.RELIABILITY.clear()
     # Restore the default control store so a budget-capped test does not
-    # leave a fake cap behind for the next test.
-    if os.environ.get("POLICY_STATE_DIR"):
-        policy.CONTROL = policy.default_store()
-    else:
-        policy.CONTROL = None
+    # leave a fake cap behind for the next test. Pin POLICY_STATE_DIR to
+    # THIS file's own empty dir first: an earlier test module (test_golden's
+    # replay harness, test_learning's mode setup) may have popped or
+    # repointed the env var, and default_store() would then read a stale
+    # learned.json/control.json from %TEMP% - the exact machine-state
+    # pollution this file's header isolates against, but only per-file.
+    os.environ["POLICY_STATE_DIR"] = _POLICY_TEST_STATE_DIR
+    os.environ["CONTROL_PATH"] = os.path.join(_POLICY_TEST_STATE_DIR, "control.json")
+    policy.CONTROL = policy.default_store() if _POLICY_TEST_STATE_DIR else None
 
 
 # --- signature extraction -------------------------------------------------

@@ -92,6 +92,16 @@ try:
 except ImportError:  # pragma: no cover
     _laya_scorer = None  # type: ignore[assignment]
 
+try:
+    # Optional at import time: the real-spend reader (usage accounting). The
+    # post-call usage_hook is the only writer; the plugin reads the tiny
+    # aggregate so the per-(model, kind) alarm can fire on RECEIVED bills,
+    # not only on pre-call estimates. Absent module => alarm stays
+    # estimate-only, byte-identical to the pre-usage build (fail-open).
+    import usage_state as _usage_state
+except ImportError:  # pragma: no cover - deployed together, split for tests
+    _usage_state = None  # type: ignore[assignment]
+
 # --------------------------------------------------------------------------
 # Tuning (env-overridable so the VPS can retune without a code edit)
 # --------------------------------------------------------------------------
@@ -176,6 +186,16 @@ EXEC_PHASE_KIND = "agentic"
 # in-memory alarms are dropped when the epoch advances. A manual clear also
 # bumps the epoch so every proxy forgets its stale alarms on the next read.
 KIND_ALARM_TTL_S = _env_float("POLICY_KIND_ALARM_TTL_S", 30.0)
+
+# Client attribution: which harness sent this request. The proxy path copies
+# the caller's HTTP headers into request metadata ("headers", authorization
+# stripped), so the User-Agent identifies the client: aider tags itself
+# "aider/...", Cursor's own server sends something containing "cursor".
+# Anything else is "other"; no header at all is "unknown". The tag lands in
+# the decision log and in the usage receipt, so a later per-client cost
+# comparison (aider vs cursor on the same task classes) needs no new plumbing.
+CLIENT_RE = re.compile(r"(aider|cursor)", re.IGNORECASE)
+
 
 # Laya shadow scorer: max additive influence on utility. The control-plane
 # weight is 0..1; it is scaled down so full weight still only nudges.
@@ -1027,6 +1047,13 @@ class PolicyState:
         # read from the control plane; stale epochs clear in-memory alarms.
         self.kind_alarms: dict[str, dict[tuple[str, str], dict[str, Any]]] = {}
         self.alarm_epoch: int = 0
+        # Real-spend baselines captured when the alarm epoch bumps: after a
+        # manual clear, only spend RECEIVED since the clear can re-fire a
+        # real-spend alarm (the on-disk usage totals are cumulative).
+        # RAM-only, like kind_alarms; a proxy restart forgets the baseline,
+        # so cumulative totals can re-alarm - fail-safe direction: an alarm
+        # re-arms rather than a runaway budget going silently unnoticed.
+        self.usage_baseline: dict[str, dict[tuple[str, str], float]] = {}
 
     def session_spend(self, session_key: str | None) -> float:
         """Estimated cumulative spend for this session from the decision log.
@@ -1091,6 +1118,13 @@ class PolicyState:
                     value.pop(alarm_key, None)
             if not value:
                 self.kind_alarms.pop(key, None)
+        # Real-spend baselines only matter while the session pin exists (the
+        # real-spend alarm branch requires a `previous` record), so they go
+        # with it. A dropped baseline means the next epoch bump re-captures;
+        # worst case an alarm re-arms after a restart, never silently off.
+        for key in list(self.usage_baseline):
+            if key not in self.sessions:
+                self.usage_baseline.pop(key, None)
 
     def trust_of(self, kind: str, model: str) -> float:
         return self.trust.get((kind, model), 0.0)
@@ -1119,6 +1153,29 @@ class PolicyState:
 
 
 STATE = PolicyState()
+
+
+def _detect_client(metadata: Mapping[str, Any]) -> str:
+    """Aider / cursor / other / unknown, from the caller's User-Agent header.
+
+    The proxy path injects the incoming HTTP headers into request metadata
+    (`metadata["headers"]`, authorization stripped) before the Router runs
+    plugins, so this is the client tag without any client-side config. A
+    direct library call (tests, scripts) simply has no headers and reads
+    "unknown" - never an error."""
+    headers = metadata.get("headers") if isinstance(metadata, Mapping) else None
+    if not isinstance(headers, Mapping):
+        return "unknown"
+    for name in ("user-agent", "User-Agent", "X-Client-Type", "x-client-type"):
+        value = headers.get(name)
+        if isinstance(value, str) and value:
+            match = CLIENT_RE.search(value)
+            if match:
+                return match.group(1).lower()
+            # An explicit non-matching user-agent is still "other" once we
+            # looked; only a total absence reads "unknown".
+            return "other"
+    return "unknown"
 
 
 def _cascade_excluded(known: list[Profile], previous: Mapping[str, Any] | None, now: float | None = None) -> tuple[set[str], dict[str, Any]]:
@@ -1302,6 +1359,23 @@ class CursorAutoPolicy:
 
         STATE.prune()
         session_key = STATE.session_key(messages, metadata)
+        client = _detect_client(metadata)
+
+        # Real-spend view (measurement plumbing): the usage_hook writes a tiny
+        # per-session aggregate (usage_state.json) from provider usage
+        # receipts; the plugin reads it here so the per-(model, kind) alarm
+        # can fire on RECEIVED bills, not only on pre-call estimates, and so
+        # the dashboard shows actual-vs-estimate without a second join. A
+        # missing module or file reads as all-zero (fail-open): the estimate
+        # path is byte-identical to the pre-usage build.
+        usage_view = None
+        if _usage_state is not None and session_key:
+            try:
+                usage_view = _usage_state.load_view(session_key)
+            except Exception:  # noqa: BLE001
+                usage_view = None
+        real_spend_hkd = round(usage_view.real_hkd, 4) if usage_view is not None else 0.0
+
 
         # ---- control plane: lease (bounded pin) --------------------------
         # A live lease overrides selection for the bounded window. Gates still
@@ -1550,15 +1624,34 @@ class CursorAutoPolicy:
         # importance routing already chose the right model per turn, but the
         # sheer volume of ~130k-token turns on premium models still added up.
         # ---- per-(model, kind) spend alarm -------------------------------
-        # A single model-kind pair burning >= KIND_ALARM_HKD in one session
-        # is treated like a runaway. The alarm is stored in RAM per session;
-        # the control plane can broadcast an alarm_epoch bump to clear all
-        # proxies' stale alarms at once (e.g. via MCP router_kind_alarm_clear).
-        # The alarm only fires when the CURRENT turn is the same kind as the
-        # runaway pair; a debug turn after a code_gen runaway should still be
-        # routed normally so the user can investigate.
+        # Two independent branches, same effect (force the cheapest capable
+        # model for this kind):
+        #  (a) estimate branch (RAM): pre-call estimates charged to the
+        #      previous turn's pair crossed KIND_ALARM_HKD recently.
+        #  (b) real branch (receipts): a PREMIUM model has actually BILLED
+        #      >= KIND_ALARM_HKD on the CURRENT kind in this session, per
+        #      usage_state.json written by the post-call usage_hook. Unlike
+        #      (a) it keys on the current kind rather than the previous
+        #      turn's model, so it survives the turn after a demotion swaps
+        #      `previous` to a cheap model; it decays only via a manual
+        #      clear (epoch bump), which is right: a bill already paid does
+        #      not expire in 30 seconds.
+        # Sync alarm_epoch BEFORE detection: a manual clear drops stale
+        # in-RAM alarms AND captures the session's cumulative real totals as
+        # a baseline, so only spend received after the clear re-fires (b).
+        if CONTROL is not None:
+            try:
+                live_epoch = CONTROL.alarm_epoch()
+                if isinstance(live_epoch, int) and live_epoch > STATE.alarm_epoch:
+                    STATE.alarm_epoch = live_epoch
+                    if session_key and usage_view is not None:
+                        STATE.usage_baseline[session_key] = dict(usage_view.kind_hkd)
+            except Exception:  # noqa: BLE001
+                pass
+
         kind_alarm_active = False
         kind_alarm_model: str | None = None
+        kind_alarm_basis: str | None = None
         if (
             session_key
             and previous
@@ -1577,17 +1670,24 @@ class CursorAutoPolicy:
             ):
                 kind_alarm_active = True
                 kind_alarm_model = previous["model"]
+                kind_alarm_basis = "estimate"
 
-        # Sync alarm_epoch from the control plane if it is configured. A
-        # manual clear bumps the epoch; any in-memory alarm with a lower
-        # epoch is immediately forgotten. No new persistent file is needed.
-        if CONTROL is not None:
-            try:
-                live_epoch = CONTROL.alarm_epoch()
-                if isinstance(live_epoch, int) and live_epoch > STATE.alarm_epoch:
-                    STATE.alarm_epoch = live_epoch
-            except Exception:  # noqa: BLE001
-                pass
+        if not kind_alarm_active and usage_view is not None and usage_view.kind_hkd:
+            baselines = STATE.usage_baseline.get(session_key, {})
+            for pair, total in usage_view.kind_hkd.items():
+                if not isinstance(pair, tuple) or len(pair) != 2:
+                    continue
+                model, kind = pair
+                if kind != signature.kind:
+                    continue
+                profile = PROFILES.get(model)
+                if profile is None or _blended_cost(profile) <= PREMIUM_COST:
+                    continue  # cheap pins are the goal, never an alarm
+                if float(total) - float(baselines.get(pair, 0.0)) >= KIND_ALARM_HKD:
+                    kind_alarm_active = True
+                    kind_alarm_model = model
+                    kind_alarm_basis = "real"
+                    break
 
         budget = None
         if CONTROL is not None:
@@ -1781,11 +1881,14 @@ class CursorAutoPolicy:
             "stall": signature.stall,
             "directives": sorted(signature.directives),
             "session": session_key,
+            "client": client,
             "spend_hkd": round(STATE.session_spend(session_key), 4),
+            "real_spend_hkd": real_spend_hkd,
             "budget_hkd": budget,
             "budget_alarm": budget_breached,
             "kind_alarm": kind_alarm_active,
             "kind_alarm_model": kind_alarm_model,
+            "kind_alarm_basis": kind_alarm_basis,
             "lease": lease.get("model") if lease is not None else None,
             "weights": {"cost": weights[0], "trust": weights[1],
                         "headroom": weights[2], "latency": weights[3]},
@@ -1823,11 +1926,14 @@ class CursorAutoPolicy:
                 "budget_alarm": budget_breached,
                 "kind_alarm": kind_alarm_active,
                 "kind_alarm_model": kind_alarm_model,
+                "kind_alarm_basis": kind_alarm_basis,
                 "has_image": signature.has_image,
                 "stall": signature.stall,
                 "directives": sorted(signature.directives),
                 "candidates": [item.profile.model for item in scored],
                 "session": session_key,
+                "client": client,
+                "real_spend_hkd": real_spend_hkd,
                 "lease": lease.get("model") if lease is not None else None,
                 "cascade": cascade_info if cascade_info.get("excluded") or cascade_info.get("penalized_model") else None,
                 "cascade_fallback": cascade_fallback,

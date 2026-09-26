@@ -443,18 +443,34 @@ BASE = f"http://127.0.0.1:{SERVICE_PORT}"
 
 
 def _service(state):
+    # control_service binds STATE_DIR/CONTROL_PATH/DECISIONS_PATH at IMPORT
+    # time, so the env only has to point at this test's temp dir across the
+    # exec_module below - it must NOT leak afterwards. Leaving POLICY_STATE_DIR
+    # repointed made every later test file's default_store() inherit a temp
+    # control.json (lease/budget/learning from whichever control test ran
+    # last): 8 order-dependent failures in test_routing_policy under a
+    # full-suite run that all passed per-file. Restore on the way out.
+    saved = {key: os.environ.get(key)
+             for key in ("POLICY_STATE_DIR", "CONTROL_PORT", "POLICY_LOG")}
     os.environ["POLICY_STATE_DIR"] = state.dir
     os.environ["CONTROL_PORT"] = str(SERVICE_PORT)
     os.environ["POLICY_LOG"] = os.path.join(state.dir, "routing.jsonl")
     # Force a fresh import: pop any cached module, then load from file so each
     # test gets module-level constants bound to ITS temp dir.
     sys.modules.pop("control_service", None)
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "control_service", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                        "control_service.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "control_service", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                            "control_service.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     return module
 
 

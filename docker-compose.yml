@@ -26,6 +26,13 @@ services:
       # by routing_policy.py but only starts a background thread when the
       # `laya` package is present and learning is enabled.
       - ./laya_scorer.py:/app/laya_scorer.py:ro
+      # usage_state.py is the shared pricing/receipt store: routing_policy
+      # reads it (real-spend alarm), usage_hook writes it. Plain stdlib only
+      # so both can load it as independent module instances.
+      - ./usage_state.py:/app/usage_state.py:ro
+      # usage_hook.py is the post-call receipt callback (litellm_settings
+      # .callbacks) feeding the same files.
+      - ./usage_hook.py:/app/usage_hook.py:ro
       - router-logs:/app/logs
       # Crossed mounts (review B4): the proxy READS control.json and can
       # never write it; only the control service has the rw mount. learned.json
@@ -70,6 +77,11 @@ services:
       CONTROL_PATH: /control/control.json
       LEARNED_PATH: /logs/learned.json
       POLICY_LOG: /logs/routing.jsonl
+      # Measurement plumbing: the usage_hook's receipt log + live aggregate,
+      # on the same read-only router-logs mount (defaults would resolve to
+      # the control container's temp dir, where nothing writes).
+      POLICY_USAGE_LOG: /logs/routing_usage.jsonl
+      POLICY_USAGE_STATE: /logs/usage_state.json
       CONTROL_PORT: "4010"
       # Bind inside the container must be 0.0.0.0 for the host-loopback
       # publish (127.0.0.1:4010) to reach it; the host side stays private.

@@ -35,6 +35,7 @@ Tools:
   router_lease_clear   - drop the active lease
   router_weights       - live-retune cost/trust/headroom/latency weights
   router_learning      - enable/disable learning, or reset one learned table
+  router_usage         - receipt-based spend (real vs estimate) per model/client/kind
 """
 
 from __future__ import annotations
@@ -206,9 +207,25 @@ TOOLS: list[dict[str, Any]] = [
         "name": "router_kind_alarm_clear",
         "description": "Clear the per-(model, task-kind) spend alarm. When one model "
         "has burned more than the configured threshold (default 20 HKD) on one task kind "
-        "inside the current session, the router forces that session to the cheapest capable "
-        "model. Call this after reviewing the runaway to resume normal routing.",
+        "inside the current session - measured on pre-call estimates OR on real usage "
+        "receipts - the router forces that session's same-kind turns to the cheapest "
+        "capable model. Call this after reviewing the runaway to resume normal routing.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "router_usage",
+        "description": "Receipt-based spend: what the provider actually billed per model, "
+        "client (cursor/aider/other) and task kind, side by side with the router's pre-call "
+        "estimates, plus live per-session real spend. Use to answer 'what did this really "
+        "cost' (estimates assume a cold cache every turn; receipts price cached reads at the "
+        "discount rate) and to check whether a kind-alarm threshold is approached.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "description": "How many receipts to roll up (1-20000, default 2000)"},
+            },
+            "additionalProperties": False,
+        },
     },
 ]
 
@@ -253,6 +270,11 @@ def _call_tool(name: str, args: Mapping[str, Any]) -> dict[str, Any]:
         return {"error": "pass hkd or clear", "ok": False}
     if name == "router_kind_alarm_clear":
         return _request("POST", "/alarm/clear", {})
+    if name == "router_usage":
+        count = args.get("n", 2000)
+        if not isinstance(count, int) or not (1 <= count <= 20000):
+            return {"error": "n must be an integer in 1..20000", "ok": False}
+        return _request("GET", f"/usage?n={count}")
     return {"error": f"unknown tool {name!r}", "ok": False}
 
 

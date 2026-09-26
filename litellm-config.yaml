@@ -253,7 +253,13 @@ litellm_settings:
   # effect - litellm's own cooldowns handle fast failures). Records upstream
   # 429/5xx per model to reliability.jsonl for /health and /learned. Inert
   # when learning is off (POLICY_LEARN=0 or control.json learning_enabled=false).
-  callbacks: [failure_hook.reliability_hook]
+  callbacks:
+    - failure_hook.reliability_hook
+    # Measurement plumbing: per-call usage receipts (prompt/completion/cached
+    # tokens -> billed HKD) joined to the routing decision via the plugin's
+    # signals. Feeds routing_usage.jsonl + usage_state.json and lets the
+    # kind-alarm fire on REAL spend. Inert with POLICY_USAGE_RECORD=0.
+    - usage_hook.usage_recorder
 
 general_settings:
   # Cursor must send this as its "API key". Keeps the proxy closed.

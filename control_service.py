@@ -24,6 +24,8 @@ Endpoints (all JSON):
   GET  /health          proxy-independent status + active lease + revision
   GET  /decisions?n=50  tail of routing.jsonl (parsed, newest last)
   GET  /learned         parsed learned.json (or {"present": false})
+  GET  /usage?n=2000    receipt-based spend rollup (real vs estimate) + sessions
+  GET  /receipts?n=50   tail of routing_usage.jsonl (newest last)
   POST /lease           {model, seconds} -> deadline lease (review B5)
   POST /lease/clear     drop any active lease
   POST /weights         {cost|trust|headroom|latency: 0..1}   (partial ok)
@@ -61,6 +63,11 @@ LEARNED_PATH = os.environ.get("LEARNED_PATH", os.path.join(STATE_DIR, "learned.j
 DECISIONS_PATH = os.environ.get("POLICY_LOG", os.path.join(STATE_DIR, "routing.jsonl"))
 # Phase 3: the failure hook's log, on the same read-only mount (review q4).
 RELIABILITY_PATH = os.environ.get("POLICY_RELIABILITY_PATH", os.path.join(STATE_DIR, "reliability.jsonl"))
+# Measurement plumbing: the usage_hook's receipts log and the tiny live
+# aggregate written alongside it (usage_state.py). Read-only here, like the
+# decision log; both live on the proxy-owned router-logs volume.
+USAGE_LOG_PATH = os.environ.get("POLICY_USAGE_LOG", os.path.join(STATE_DIR, "routing_usage.jsonl"))
+USAGE_STATE_PATH = os.environ.get("POLICY_USAGE_STATE", os.path.join(STATE_DIR, "usage_state.json"))
 PORT = int(os.environ.get("CONTROL_PORT", "4010"))
 # Bearer token the service itself requires. Distinct from the nginx path
 # token and from LITELLM_MASTER_KEY: a leaked MCP config must not be able to
@@ -347,6 +354,92 @@ def _reliability_stats() -> dict[str, dict[str, int]]:
     return stats
 
 
+def tail_usage(limit: int) -> list[dict[str, Any]]:
+    """Newest `limit` usage receipts from routing_usage.jsonl.
+
+    Same torn-write robustness as tail_decisions: parse line-by-line, skip
+    anything that is not a valid dict, so a half-written final line cannot
+    hide the good records before it."""
+    try:
+        with open(USAGE_LOG_PATH, encoding="utf-8") as handle:
+            content = handle.read()
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in content.splitlines()[-limit * 2:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            out.append(record)
+    return out[-limit:]
+
+
+def _load_usage_state() -> dict[str, Any]:
+    try:
+        with open(USAGE_STATE_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def usage_summary(limit: int = 2000) -> dict[str, Any]:
+    """Receipt-based spend rollup for the dashboard.
+
+    Returns the real billed HKD vs the pre-call estimate, broken down per
+    model, per client (aider/cursor/...), and per task kind, over the newest
+    `limit` receipts. This is what closes the dashboard-vs-bill gap: the
+    estimate column sums est_cost_hkd (worst-case, uncached); the actual
+    column sums real_cost_hkd (cached reads at the discount rate). If the
+    receipts log is absent the totals read as zero and `present` is false,
+    so the dashboard shows the estimate it always showed rather than a
+    misleading empty bill.
+    """
+    records = tail_usage(limit)
+    totals = {
+        "present": bool(records),
+        "count": len(records),
+        "real_hkd": 0.0,
+        "est_hkd": 0.0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cached_tokens": 0,
+        "by_model": {},
+        "by_client": {},
+        "by_kind": {},
+    }
+
+    def _bump(table: dict[str, dict[str, float]], key: str, real: float, est: float) -> None:
+        row = table.setdefault(key, {"real_hkd": 0.0, "est_hkd": 0.0, "calls": 0})
+        row["real_hkd"] = round(row["real_hkd"] + real, 6)
+        row["est_hkd"] = round(row["est_hkd"] + est, 6)
+        row["calls"] += 1
+
+    for record in records:
+        model = record.get("model")
+        if not isinstance(model, str) or not model:
+            continue
+        real = float(record.get("real_cost_hkd") or 0.0)
+        raw_est = record.get("est_cost_hkd")
+        est = float(raw_est) if isinstance(raw_est, (int, float)) else 0.0
+        client = record.get("client") if isinstance(record.get("client"), str) else "unknown"
+        kind = record.get("kind") if isinstance(record.get("kind"), str) else "unknown"
+        totals["real_hkd"] = round(totals["real_hkd"] + real, 6)
+        totals["est_hkd"] = round(totals["est_hkd"] + est, 6)
+        totals["prompt_tokens"] += int(record.get("prompt_tokens") or 0)
+        totals["completion_tokens"] += int(record.get("completion_tokens") or 0)
+        totals["cached_tokens"] += int(record.get("cached_tokens") or 0)
+        _bump(totals["by_model"], model, real, est)
+        _bump(totals["by_client"], client, real, est)
+        _bump(totals["by_kind"], kind, real, est)
+    return totals
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "llm-router-control/1"
 
@@ -405,6 +498,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/learned":
             self._send(200, {"present": os.path.exists(LEARNED_PATH), "learned": _load_learned()})
+            return
+        if parsed.path == "/usage":
+            # Receipt-based spend rollup (real vs estimate, per model/client/
+            # kind). Also exposes the live per-session aggregate so the
+            # dashboard can join a decision row to its session's real spend.
+            params = parse_qs(parsed.query)
+            try:
+                limit = max(1, min(20000, int(params.get("n", ["2000"])[0])))
+            except ValueError:
+                limit = 2000
+            self._send(200, {"summary": usage_summary(limit),
+                             "sessions": _load_usage_state().get("sessions", {})})
+            return
+        if parsed.path == "/receipts":
+            params = parse_qs(parsed.query)
+            try:
+                limit = max(1, min(500, int(params.get("n", ["50"])[0])))
+            except ValueError:
+                limit = 50
+            self._send(200, {"receipts": tail_usage(limit)})
             return
         self._send(404, {"error": "not found"})
 
