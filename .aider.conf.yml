@@ -1,6 +1,6 @@
-# Aider configuration — llm-router repo
+# Aider configuration - llm-router repo
 # Docs: https://aider.chat/docs/config.html
-# Env (set in your shell before launch, NOT here — secrets never go in git):
+# Env (set in your shell before launch, NOT here - secrets never go in git):
 #   OPENAI_API_BASE = https://router.ifmphk.com/24b8fa195657da6bc97495e5e28051b304bded55446933a5/v1
 #   OPENAI_API_KEY  = <ROUTER_KEY_DEFAULT from the VPS .env>
 
@@ -22,9 +22,8 @@ edit-format: diff
 # names exact paths per task; the map just spends tokens.
 map-tokens: 0
 
-# Attribute every aider session in router receipts (the User-Agent already
-# contains "aider"; this keeps the attribution stable if the agent string changes).
-attribute-author: aider
+# The router already tags receipts via the User-Agent string "aider", so no
+# extra attribution setting is needed here.
 
 # Show the diff before each manual commit prompt.
 # (default behavior; listed so future readers know the workflow)
