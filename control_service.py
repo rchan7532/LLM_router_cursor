@@ -392,8 +392,9 @@ def usage_summary(limit: int = 2000) -> dict[str, Any]:
     """Receipt-based spend rollup for the dashboard.
 
     Returns the real billed HKD vs the pre-call estimate, broken down per
-    model, per client (aider/cursor/...), and per task kind, over the newest
-    `limit` receipts. This is what closes the dashboard-vs-bill gap: the
+    model, per client (aider/cursor/...), per task kind, and per task slug
+    (with a redo flag when the same slug appears under multiple clients),
+    over the newest `limit` receipts. This is what closes the dashboard-vs-bill gap: the
     estimate column sums est_cost_hkd (worst-case, uncached); the actual
     column sums real_cost_hkd (cached reads at the discount rate). If the
     receipts log is absent the totals read as zero and `present` is false,
@@ -412,9 +413,13 @@ def usage_summary(limit: int = 2000) -> dict[str, Any]:
         "by_model": {},
         "by_client": {},
         "by_kind": {},
+        "by_task": {},
+        "task_redo": [],
     }
+    by_task_flat: dict[tuple[str, str], dict[str, Any]] = {}
+    task_clients: dict[str, set[str]] = {}
 
-    def _bump(table: dict[str, dict[str, float]], key: str, real: float, est: float) -> None:
+    def _bump(table: dict[Any, dict[str, Any]], key: Any, real: float, est: float) -> None:
         row = table.setdefault(key, {"real_hkd": 0.0, "est_hkd": 0.0, "calls": 0})
         row["real_hkd"] = round(row["real_hkd"] + real, 6)
         row["est_hkd"] = round(row["est_hkd"] + est, 6)
@@ -429,6 +434,7 @@ def usage_summary(limit: int = 2000) -> dict[str, Any]:
         est = float(raw_est) if isinstance(raw_est, (int, float)) else 0.0
         client = record.get("client") if isinstance(record.get("client"), str) else "unknown"
         kind = record.get("kind") if isinstance(record.get("kind"), str) else "unknown"
+        task = record.get("task") if isinstance(record.get("task"), str) else None
         totals["real_hkd"] = round(totals["real_hkd"] + real, 6)
         totals["est_hkd"] = round(totals["est_hkd"] + est, 6)
         totals["prompt_tokens"] += int(record.get("prompt_tokens") or 0)
@@ -437,6 +443,12 @@ def usage_summary(limit: int = 2000) -> dict[str, Any]:
         _bump(totals["by_model"], model, real, est)
         _bump(totals["by_client"], client, real, est)
         _bump(totals["by_kind"], kind, real, est)
+        if task is not None:
+            _bump(by_task_flat, (task, client), real, est)
+            task_clients.setdefault(task, set()).add(client)
+    for (task, client), row in by_task_flat.items():
+        totals["by_task"].setdefault(task, {})[client] = row
+    totals["task_redo"] = sorted(task for task, clients in task_clients.items() if len(clients) >= 2)
     return totals
 
 

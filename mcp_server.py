@@ -215,10 +215,12 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "router_usage",
         "description": "Receipt-based spend: what the provider actually billed per model, "
-        "client (cursor/aider/other) and task kind, side by side with the router's pre-call "
-        "estimates, plus live per-session real spend. Use to answer 'what did this really "
-        "cost' (estimates assume a cold cache every turn; receipts price cached reads at the "
-        "discount rate) and to check whether a kind-alarm threshold is approached.",
+        "client (cursor/aider/other), task kind, and task tag (sticky per session, "
+        "e.g. [[task:module-kit]]), side by side with the router's pre-call estimates, "
+        "plus live per-session real spend. Includes by_task (HKD and calls per slug × client) "
+        "and task_redo (slugs seen under >=2 clients in the window). Use to answer 'what did "
+        "this really cost' (estimates assume a cold cache every turn; receipts price cached "
+        "reads at the discount rate) and to check whether a kind-alarm threshold is approached.",
         "inputSchema": {
             "type": "object",
             "properties": {

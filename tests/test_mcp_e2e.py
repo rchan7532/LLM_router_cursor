@@ -89,7 +89,8 @@ def main() -> int:
         names = {tool["name"] for tool in listed["result"]["tools"]}
         expected = {"router_health", "router_decisions", "router_learned",
                     "router_lease", "router_lease_clear", "router_weights",
-                    "router_learning", "router_budget"}
+                    "router_learning", "router_budget", "router_usage",
+                    "router_kind_alarm_clear"}
         if names != expected:
             failures.append(f"tools/list mismatch: {names ^ expected}")
 

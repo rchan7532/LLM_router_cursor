@@ -15,6 +15,7 @@
     td.ts { font-variant-numeric: tabular-nums; color: #9aa0a6; }
     td.chosen { font-weight: 600; color: #8ab4f8; }
     td.kind { color: #c58af9; }
+    td.task { color: #f28b82; }
     td.imp-low { color: #81c995; }
     td.imp-normal { color: #9aa0a6; }
     td.imp-high { color: #fdd663; }
@@ -62,6 +63,7 @@
         <th>Chosen</th>
         <th>Client</th>
         <th>Kind</th>
+        <th>Task</th>
         <th>Importance</th>
         <th>Reason</th>
         <th>Scale</th>
@@ -169,6 +171,7 @@
         <td class="chosen">${modelShort(r.chosen)}</td>
         <td class="client">${r.client || '?'}</td>
         <td class="kind">${r.kind || '—'}</td>
+        <td class="task">${r.task || '—'}</td>
         <td class="${impClass}">${r.importance != null ? impLabel : '—'}</td>
         <td class="reason ${reasonClass}">${r.reason || '—'}</td>
         <td>${r.scale ?? '—'}</td>
@@ -200,6 +203,21 @@
       .sort((a, b) => b[1].real_hkd - a[1].real_hkd).slice(0, 7)
       .map(([m, v]) => `${modelShort(m)} ${v.real_hkd.toFixed(2)}`);
     if (models.length) parts.push('By model: ' + models.join(' · '));
+    const redo = new Set(summary.task_redo || []);
+    const taskParts = Object.entries(summary.by_task || {})
+      .map(([slug, clients]) => {
+        const total = Object.values(clients).reduce((s, v) => s + v.real_hkd, 0);
+        return { slug, total, clients };
+      })
+      .sort((a, b) => b.total - a.total)
+      .map(({ slug, clients }) => {
+        const clientParts = Object.entries(clients)
+          .sort((a, b) => b[1].real_hkd - a[1].real_hkd)
+          .map(([c, v]) => `${c} ${v.real_hkd.toFixed(2)} (${v.calls})`);
+        const marker = redo.has(slug) ? ' <span class="dead">[redo]</span>' : '';
+        return `${slug}: ` + clientParts.join(' · ') + marker;
+      });
+    if (taskParts.length) parts.push('By task: ' + taskParts.join(' · '));
     el.innerHTML = parts.join('<br>');
   }
 
