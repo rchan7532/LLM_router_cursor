@@ -1,0 +1,7 @@
+# Per-model settings for aider (https://aider.chat/docs/config/adv-model-settings.html)
+# The cursor-auto group includes thinking models that only accept
+# temperature=1; aider's default of 0 made every request fail with
+# "invalid temperature: only 1 is allowed for this model".
+- name: openai/cursor-auto
+  extra_params:
+    temperature: 1
