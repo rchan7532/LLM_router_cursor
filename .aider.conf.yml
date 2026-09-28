@@ -8,7 +8,6 @@ model: openai/cursor-auto
 
 # Review each diff before it lands; commit manually with the task tag.
 auto-commits: false
-auto-top-add: false
 
 # The plan + spec drive the work; keep them read-only so aider edits code, not its own instructions.
 read: docs/plans/2026-09-27-task-tag-harness-measurement-plan.md
