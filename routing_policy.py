@@ -562,6 +562,12 @@ PROFILES: dict[str, Profile] = {
 }
 
 DIRECTIVE_RE = re.compile(r"\[\[\s*(escalate|cheap|use:\s*([A-Za-z0-9._\-/]+)|low|high)\s*\]\]", re.IGNORECASE)
+# Task-tag directive ([[task:<slug>]], 2026-09-27 spec): a per-session
+# measurement label that joins Cursor plans to Aider executions. It never
+# affects selection - receipts and rollups only. The regex is authoritative
+# over the spec prose (a trailing hyphen is tolerated and valid).
+TASK_RE = re.compile(r"\[\[task:([a-z0-9][a-z0-9-]{0,38})\]\]")
+TASK_CLEAR_RE = re.compile(r"\[\[task:\s*\]\]")
 ESCALATE_WORD = "ESCALATE"
 # Escalate-word guarding (2026-09-25 deploy-stage incident): the bare word
 # "ESCALATE" appears in pasted agent advice ("type ESCALATE and I'll route
@@ -636,7 +642,7 @@ class Signature:
     __slots__ = (
         "kind", "scale", "est_tokens", "has_image", "tool_fanout",
         "text", "directives", "use_model", "stall",
-        "importance", "ask_tokens",
+        "importance", "ask_tokens", "task_tag",
     )
 
     def __init__(
@@ -652,6 +658,7 @@ class Signature:
         stall: int = 0,
         importance: int = 1,
         ask_tokens: int = 0,
+        task_tag: "str | None" = None,
     ) -> None:
         self.kind = kind
         self.scale = scale
@@ -670,6 +677,8 @@ class Signature:
         # the whole-conversation est_tokens so long threads don't inflate the
         # capability bar for simple questions.
         self.ask_tokens = ask_tokens if ask_tokens else len(text) // 4
+        # Per-session measurement label from [[task:<slug>]], if any.
+        self.task_tag = task_tag
 
 
 def _message_text(content: Any) -> str:
@@ -910,6 +919,22 @@ def _detect_stall(messages: Sequence[Mapping[str, Any]]) -> int:
     return run_length if run_length >= 3 else 0
 
 
+def _detect_task_tag(ask: str, previous: Mapping[str, Any] | None) -> str | None:
+    """Newest tag in the newest human ask wins; else the sticky tag;
+    an explicit [[task:]] clears. System/assistant text is never scanned
+    (build_signature only reads the newest human message)."""
+    clear = TASK_CLEAR_RE.search(ask)
+    match = TASK_RE.search(ask)
+    if match:
+        return match.group(1)
+    if clear:
+        return None
+    if isinstance(previous, Mapping):
+        prev_tag = previous.get("task_tag")
+        return prev_tag if isinstance(prev_tag, str) and prev_tag else None
+    return None
+
+
 def build_signature(messages: Sequence[Mapping[str, Any]]) -> Signature | None:
     ask_pair = _newest_human_ask(messages)
     if ask_pair is None:
@@ -952,6 +977,10 @@ def build_signature(messages: Sequence[Mapping[str, Any]]) -> Signature | None:
     # incident). The whole-thread est_tokens is untouched, so context
     # fitting and headroom still see the true size.
     instruction = CODE_FENCE_BLOCK_RE.sub(" ", _strip_quoted_narrative(ask))
+    # Newest-message task-tag parse only. Sticky resolution needs `previous`
+    # and happens in the request path.
+    task_match = TASK_RE.search(ask)
+    task_tag = task_match.group(1) if task_match else None
     return Signature(
         kind=kind,
         scale=scale,
@@ -964,6 +993,7 @@ def build_signature(messages: Sequence[Mapping[str, Any]]) -> Signature | None:
         stall=_detect_stall(messages),
         importance=_detect_importance(instruction, kind, frozenset(directives), est_tokens),
         ask_tokens=len(instruction) // 4,
+        task_tag=task_tag,
     )
 
 
@@ -1156,7 +1186,13 @@ STATE = PolicyState()
 
 
 def _detect_client(metadata: Mapping[str, Any]) -> str:
-    """Aider / cursor / other / unknown, from the caller's User-Agent header.
+    """Aider / cursor / other / unknown, from the caller's identity headers.
+
+    X-Client-Type wins when present: nginx stamps it per entry path (the
+    aider path token sets `X-Client-Type: aider`), so it reflects the route
+    the caller used and cannot be diluted by a User-Agent that doesn't
+    mention the tool name (aider's UA string does not contain "aider" - that
+    misattributed its whole first session as "other").
 
     The proxy path injects the incoming HTTP headers into request metadata
     (`metadata["headers"]`, authorization stripped) before the Router runs
@@ -1166,7 +1202,14 @@ def _detect_client(metadata: Mapping[str, Any]) -> str:
     headers = metadata.get("headers") if isinstance(metadata, Mapping) else None
     if not isinstance(headers, Mapping):
         return "unknown"
-    for name in ("user-agent", "User-Agent", "X-Client-Type", "x-client-type"):
+    for name in ("x-client-type", "X-Client-Type"):
+        value = headers.get(name)
+        if isinstance(value, str) and value.strip():
+            text = value.strip().lower()
+            if text in ("aider", "cursor"):
+                return text
+            return "other"
+    for name in ("user-agent", "User-Agent"):
         value = headers.get(name)
         if isinstance(value, str) and value:
             match = CLIENT_RE.search(value)
@@ -1402,6 +1445,11 @@ class CursorAutoPolicy:
 
         previous = STATE.sessions.get(session_key) if session_key else None
 
+        # Resolve the per-session task tag from the newest human ask. The tag
+        # is measurement-only: it never affects gates, selection, or alarms.
+        task_tag = _detect_task_tag(signature.text, previous)
+        signature.task_tag = task_tag
+
         # ---- stale-ask execution demotion --------------------------------
         # The newest human ask has driven >= EXEC_PHASE_TURNS turns with tool
         # activity: the planning decision is made, the loop is now executing
@@ -1429,6 +1477,7 @@ class CursorAutoPolicy:
                 stall=signature.stall,
                 importance=min(signature.importance, 1),
                 ask_tokens=min(signature.ask_tokens, 399),  # ask_scale 0
+                task_tag=task_tag,
             )
             exec_demoted = True
 
@@ -1849,6 +1898,7 @@ class CursorAutoPolicy:
                 # containment verdict on the NEXT turn.
                 "ask": signature.text,
                 "spend_hkd": session_spend + turn_cost,
+                "task_tag": task_tag,
             }
             # Update per-(model, kind) spend alarm. Only the previous turn's
             # model-kind pair is charged; the winner of THIS turn is charged
@@ -1880,6 +1930,7 @@ class CursorAutoPolicy:
             "has_image": signature.has_image,
             "stall": signature.stall,
             "directives": sorted(signature.directives),
+            "task": task_tag,
             "session": session_key,
             "client": client,
             "spend_hkd": round(STATE.session_spend(session_key), 4),
@@ -1930,6 +1981,7 @@ class CursorAutoPolicy:
                 "has_image": signature.has_image,
                 "stall": signature.stall,
                 "directives": sorted(signature.directives),
+                "task": task_tag,
                 "candidates": [item.profile.model for item in scored],
                 "session": session_key,
                 "client": client,

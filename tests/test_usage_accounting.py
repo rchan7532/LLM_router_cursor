@@ -222,6 +222,16 @@ def test_client_tag_from_headers_and_default():
     run(ctx)
     assert ctx.signals["policy"]["client"] == "aider"
 
+    # X-Client-Type (nginx path stamp) wins over a UA that doesn't name the
+    # tool - aider's real UA lacks the string "aider", which misattributed
+    # its first whole session as "other".
+    reset()
+    ctx = Context(ask("quick question"),
+                  metadata={"headers": {"user-agent": "Aider/0.86.2 (https://aider.chat)",
+                                        "X-Client-Type": "aider"}})
+    run(ctx)
+    assert ctx.signals["policy"]["client"] == "aider"
+
     reset()
     ctx = Context(ask("quick question"),
                   metadata={"headers": {"User-Agent": "Cursor-Server/2.0"}})
@@ -343,6 +353,42 @@ def test_client_does_not_change_routing_decision():
     run(b)
     assert a.candidate_models == b.candidate_models
     assert a.signals["policy"]["client"] != b.signals["policy"]["client"]
+
+
+def test_receipt_roundtrip_with_task():
+    reset()
+    usage_state.record_receipt(session="s1", model="openai/glm-5.3-flash",
+                               kind="code_gen", client="aider", task="module-kit",
+                               prompt_tokens=1000, completion_tokens=100, cached_tokens=0)
+    records = [json.loads(l) for l in open(usage_state.USAGE_LOG_PATH, encoding="utf-8")]
+    assert records[-1]["task"] == "module-kit"
+    view = usage_state.load_view("s1")
+    assert view.task_hkd[("module-kit", "aider")] > 0.0
+
+
+def test_receipt_task_none_keeps_old_shape():
+    reset()
+    usage_state.record_receipt(session="s2", model="openai/glm-5.3-flash",
+                               kind="factual", client="cursor",
+                               prompt_tokens=10, completion_tokens=5)
+    view = usage_state.load_view("s2")
+    assert view.task_hkd == {}
+
+
+def test_hook_extract_task_from_policy_signals():
+    kwargs = _kwargs(signals_policy={
+        "session": "s3", "kind": "code_gen", "client": "aider",
+        "chosen": "openai/glm-5.3-flash", "est_cost_hkd": 0.01, "task": "crud-endpoint"})
+    parts = usage_hook.extract_receipt_parts(kwargs, FakeResponse(FakeUsage(100, 20)))
+    assert parts["task"] == "crud-endpoint"
+
+
+def test_hook_extract_task_absent_is_none():
+    kwargs = _kwargs(signals_policy={
+        "session": "s4", "kind": "factual", "client": "cursor",
+        "chosen": "openai/glm-5.3-flash", "est_cost_hkd": 0.001})
+    parts = usage_hook.extract_receipt_parts(kwargs, FakeResponse(FakeUsage(50, 10)))
+    assert parts["task"] is None
 
 
 if __name__ == "__main__":

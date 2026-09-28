@@ -123,6 +123,7 @@ def extract_receipt_parts(kwargs: Any, response_obj: Any) -> dict[str, Any] | No
         "session": policy.get("session") if isinstance(policy.get("session"), str) else None,
         "kind": policy.get("kind") if isinstance(policy.get("kind"), str) else None,
         "client": policy.get("client") if isinstance(policy.get("client"), str) else _client_from_headers(kwargs),
+        "task": policy.get("task") if isinstance(policy.get("task"), str) else None,
         "est_cost_hkd": policy.get("est_cost_hkd"),
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -153,13 +154,21 @@ def _normalise_model(model: str) -> str:
 
 def _client_from_headers(kwargs: Any) -> str:
     """Fallback client tag when no policy signal exists (direct escape-hatch
-    group, plugin disabled): read the caller's User-Agent off the request
-    metadata the proxy injects. Same vocabulary as routing_policy._detect_client
-    but deliberately not shared code (separate module instances, and the
-    plugin must keep working without this file and vice versa)."""
+    group, plugin disabled): read the caller's identity off the request
+    metadata the proxy injects. X-Client-Type wins (nginx stamps it per
+    entry path, so it reflects the route the caller used, not whatever the
+    client library puts in User-Agent - aider's UA string does not contain
+    "aider"). User-Agent is the secondary signal. Same vocabulary as
+    routing_policy._detect_client but deliberately not shared code (separate
+    module instances, and the plugin must keep working without this file and
+    vice versa)."""
     headers = _get(kwargs, "metadata", "headers") or _get(kwargs, "litellm_params", "metadata", "headers")
     if not isinstance(headers, Mapping):
         return "unknown"
+    explicit = headers.get("x-client-type") or headers.get("X-Client-Type") or ""
+    text = str(explicit).strip().lower()
+    if text in {"aider", "cursor", "other"}:
+        return text
     agent = headers.get("user-agent") or headers.get("User-Agent") or ""
     lowered = str(agent).lower()
     if "aider" in lowered:
@@ -185,6 +194,7 @@ class UsageRecorder(CustomLogger if CustomLogger is not object else object):  # 
             model=parts["model"],
             kind=parts["kind"],
             client=parts["client"],
+            task=parts["task"],
             prompt_tokens=parts["prompt_tokens"],
             completion_tokens=parts["completion_tokens"],
             cached_tokens=parts["cached_tokens"],
