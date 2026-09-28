@@ -884,6 +884,47 @@ def test_laya_weight_is_logged_when_configured():
         policy._laya_scorer = None
 
 
+def test_task_tag_parsed_and_logged():
+    reset()
+    ctx = run(Context(ask("add the kit generator [[task:module-kit]]")))
+    decision = ctx.signals["policy"]
+    assert decision["task"] == "module-kit", decision
+
+
+def test_task_tag_sticky_until_new_tag():
+    reset()
+    run(Context(ask("add the kit generator [[task:module-kit]]")))
+    ctx2 = run(Context(ask("continue the kit work")))          # no tag: sticky
+    assert ctx2.signals["policy"]["task"] == "module-kit"
+    ctx3 = run(Context(ask("now the crud work [[task:crud-endpoint]]")))
+    assert ctx3.signals["policy"]["task"] == "crud-endpoint"   # newest wins
+
+
+def test_task_tag_clear_directive():
+    reset()
+    run(Context(ask("do the kit [[task:module-kit]]")))
+    ctx2 = run(Context(ask("unrelated chat now [[task:]]")))
+    assert ctx2.signals["policy"]["task"] is None
+
+
+def test_task_tag_malformed_ignored():
+    reset()
+    ctx = run(Context(ask("do the kit [[task:Bad_Slug]] [[task:" + "x" * 45 + "]]")))
+    assert ctx.signals["policy"]["task"] is None
+
+
+def test_task_tag_in_system_message_ignored():
+    reset()
+    msgs = [
+        {"role": "system", "content": "plan: [[task:module-kit]]"},
+        {"role": "user", "content": "seed"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "continue"},
+    ]
+    ctx = run(Context(msgs))
+    assert ctx.signals["policy"]["task"] is None
+
+
 if __name__ == "__main__":
     failures = 0
     for name, function in sorted(globals().items()):

@@ -451,10 +451,12 @@ def _service(state):
     # last): 8 order-dependent failures in test_routing_policy under a
     # full-suite run that all passed per-file. Restore on the way out.
     saved = {key: os.environ.get(key)
-             for key in ("POLICY_STATE_DIR", "CONTROL_PORT", "POLICY_LOG")}
+             for key in ("POLICY_STATE_DIR", "CONTROL_PORT", "POLICY_LOG",
+                         "POLICY_USAGE_LOG")}
     os.environ["POLICY_STATE_DIR"] = state.dir
     os.environ["CONTROL_PORT"] = str(SERVICE_PORT)
     os.environ["POLICY_LOG"] = os.path.join(state.dir, "routing.jsonl")
+    os.environ["POLICY_USAGE_LOG"] = os.path.join(state.dir, "routing_usage.jsonl")
     # Force a fresh import: pop any cached module, then load from file so each
     # test gets module-level constants bound to ITS temp dir.
     sys.modules.pop("control_service", None)
@@ -619,6 +621,38 @@ def test_service_laya_weight_roundtrip():
             raise AssertionError("expected 400")
         except urllib.error.HTTPError as error:
             assert error.code == 400
+
+    _run_service(service, checks)
+
+
+def test_usage_by_task_and_redo():
+    state = TempState()
+    records = [
+        {"ts": 1, "session": "s", "model": "openai/glm-5.3-flash", "kind": "code_gen",
+         "client": "cursor", "task": "module-kit", "prompt_tokens": 100,
+         "completion_tokens": 10, "cached_tokens": 0,
+         "real_cost_hkd": 0.01, "est_cost_hkd": 0.02},
+        {"ts": 2, "session": "s2", "model": "openai/glm-5.3-flash", "kind": "code_gen",
+         "client": "aider", "task": "module-kit", "prompt_tokens": 100,
+         "completion_tokens": 10, "cached_tokens": 0,
+         "real_cost_hkd": 0.005, "est_cost_hkd": 0.02},
+        {"ts": 3, "session": "s3", "model": "openai/glm-5.3-flash", "kind": "factual",
+         "client": "cursor", "task": None, "prompt_tokens": 10,
+         "completion_tokens": 2, "cached_tokens": 0,
+         "real_cost_hkd": 0.001, "est_cost_hkd": 0.002},
+    ]
+    with open(os.path.join(state.dir, "routing_usage.jsonl"), "w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+    os.environ["CONTROL_TOKEN"] = "s3cr3t-token"
+    service = _service(state)   # fresh import binds USAGE_LOG_PATH to state.dir
+
+    def checks():
+        data = _http_with_token("s3cr3t-token")("GET", "/usage")["summary"]
+        assert data["by_task"]["module-kit"]["cursor"]["calls"] == 1
+        assert data["by_task"]["module-kit"]["cursor"]["real_hkd"] == 0.01
+        assert data["by_task"]["module-kit"]["aider"]["real_hkd"] == 0.005
+        assert data["task_redo"] == ["module-kit"]
 
     _run_service(service, checks)
 

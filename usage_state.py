@@ -179,21 +179,29 @@ def _append_receipt_locked(record: dict[str, Any]) -> None:
 
 
 def record_receipt(*, session: str | None, model: str, kind: str | None,
-                   client: str | None, prompt_tokens: int, completion_tokens: int,
+                   client: str | None, task: str | None = None,
+                   prompt_tokens: int, completion_tokens: int,
                    cached_tokens: int = 0, est_cost_hkd: float | None = None,
                    ts: float | None = None) -> float:
     """Record one usage receipt. Returns the real HKD for this call (0.0 for
     an unpriced model). Updates the durable log, the RAM aggregate, and the
     on-disk aggregate the plugin reads. Never raises to the caller's caller
-    beyond what json/os can throw, which the hook wraps anyway."""
+    beyond what json/os can throw, which the hook wraps anyway.
+
+    task is a measurement-only label from routing_policy's [[task:<slug>]]
+    directive. It never affects routing and defaults to None for all existing
+    callers (fail-open).
+    """
     now = time.time() if ts is None else ts
     real = real_cost_hkd(model, prompt_tokens, completion_tokens, cached_tokens)
+    task_value = task if isinstance(task, str) and task else None
     record = {
         "ts": now,
         "session": session,
         "model": model,
         "kind": kind,
         "client": client,
+        "task": task_value,
         "prompt_tokens": _int(prompt_tokens),
         "completion_tokens": _int(completion_tokens),
         "cached_tokens": _int(cached_tokens),
@@ -204,7 +212,7 @@ def record_receipt(*, session: str | None, model: str, kind: str | None,
         _append_receipt_locked(record)
         if session:
             entry = _AGG.setdefault(
-                session, {"ts": now, "real_hkd": 0.0, "kinds": {}, "clients": {}}
+                session, {"ts": now, "real_hkd": 0.0, "kinds": {}, "clients": {}, "tasks": {}}
             )
             entry["ts"] = now
             entry["real_hkd"] = round(float(entry.get("real_hkd", 0.0)) + real, 6)
@@ -215,6 +223,10 @@ def record_receipt(*, session: str | None, model: str, kind: str | None,
             if client:
                 clients = entry.setdefault("clients", {})
                 clients[client] = round(float(clients.get(client, 0.0)) + real, 6)
+            if task_value and client:
+                tasks = entry.setdefault("tasks", {})
+                tk = f"{task_value}\x00{client}"
+                tasks[tk] = round(float(tasks.get(tk, 0.0)) + real, 6)
             _prune_locked(now)
             _flush_locked()
     return real
@@ -228,12 +240,13 @@ class UsageView:
     """A point-in-time snapshot of the on-disk aggregate. Plain class (no
     dataclass) to match the module-loading discipline used across this repo."""
 
-    __slots__ = ("real_hkd", "kind_hkd", "client_hkd")
+    __slots__ = ("real_hkd", "kind_hkd", "client_hkd", "task_hkd")
 
     def __init__(self) -> None:
         self.real_hkd = 0.0
         self.kind_hkd: dict[tuple[str, str], float] = {}
         self.client_hkd: dict[str, float] = {}
+        self.task_hkd: dict[tuple[str, str], float] = {}
 
 
 _EMPTY = UsageView()
@@ -253,6 +266,10 @@ def _parse_entry(entry: Any) -> UsageView:
             view.kind_hkd[(model, kind)] = float(val or 0.0)
     for cl, val in (entry.get("clients") or {}).items():
         view.client_hkd[str(cl)] = float(val or 0.0)
+    for tk, val in (entry.get("tasks") or {}).items():
+        if isinstance(tk, str) and "\u0000" in tk:
+            slug, client = tk.split("\u0000", 1)
+            view.task_hkd[(slug, client)] = float(val or 0.0)
     return view
 
 
