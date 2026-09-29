@@ -18,7 +18,7 @@ echo
 echo "=== probe mimo through proxy ==="
 curl -s -m 60 http://127.0.0.1:4000/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"mimo","messages":[{"role":"user","content":"hi"}],"max_tokens":3}' | head -c 150
+  -d '{"model":"mimo-v2.6-pro","messages":[{"role":"user","content":"hi"}],"max_tokens":3}' | head -c 150
 echo
 sleep 6
 echo "=== receipts for both probes ==="

@@ -243,7 +243,7 @@ model_list:
     model_info:
       supports_vision: true
 
-  - model_name: mimo
+  - model_name: mimo-v2.6-pro
     litellm_params:
       model: openai/mimo-v2.6-pro
       api_key: os.environ/MIMO_KEY
