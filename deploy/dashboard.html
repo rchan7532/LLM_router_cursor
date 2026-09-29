@@ -201,8 +201,22 @@
     if (clients.length) parts.push('By client: ' + clients.join(' · '));
     const models = Object.entries(summary.by_model || {})
       .sort((a, b) => b[1].real_hkd - a[1].real_hkd).slice(0, 7)
-      .map(([m, v]) => `${modelShort(m)} ${v.real_hkd.toFixed(2)}`);
+      .map(([m, v]) => {
+        const calls = v.calls;
+        const avgS = (v.duration_calls && v.duration_s)
+          ? ` ${(v.duration_s / v.duration_calls).toFixed(1)}s`
+          : '';
+        return `${modelShort(m)} ${v.real_hkd.toFixed(2)} (${calls}${avgS})`;
+      });
     if (models.length) parts.push('By model: ' + models.join(' · '));
+    const taskModels = Object.entries(summary.by_task_model || {})
+      .map(([slug, models]) => {
+        const parts = Object.entries(models)
+          .sort((a, b) => b[1].real_hkd - a[1].real_hkd)
+          .map(([m, v]) => `${modelShort(m)} ${v.real_hkd.toFixed(2)} (${v.calls})`);
+        return `${slug}: ` + parts.join(' · ');
+      });
+    if (taskModels.length) parts.push('By task × model: ' + taskModels.join(' · '));
     const redo = new Set(summary.task_redo || []);
     const taskParts = Object.entries(summary.by_task || {})
       .map(([slug, clients]) => {

@@ -161,13 +161,16 @@ def test_load_view_picks_up_file_updates():
 
 # --- usage_hook: extraction --------------------------------------------------
 
-def _kwargs(signals_policy=None, headers=None, model="openai/glm-5.3"):
+def _kwargs(signals_policy=None, headers=None, model="openai/glm-5.3", signals=None):
+    merged = dict(signals or {})
+    if signals_policy:
+        merged["policy"] = signals_policy
     return {
         "model": model,
         "metadata": ({"headers": headers} if headers is not None else {}),
         "litellm_params": {
             "metadata": {
-                "routing_plugin_signals": ({"policy": signals_policy} if signals_policy else {})
+                "routing_plugin_signals": merged
             }
         },
     }
@@ -389,6 +392,127 @@ def test_hook_extract_task_absent_is_none():
         "chosen": "openai/glm-5.3-flash", "est_cost_hkd": 0.001})
     parts = usage_hook.extract_receipt_parts(kwargs, FakeResponse(FakeUsage(50, 10)))
     assert parts["task"] is None
+
+
+def test_hook_extract_falls_back_to_annotator_signals():
+    """Escape-hatch groups (mimo-v2.6-pro) never build a `policy` dict; the
+    routing plugin leaves only top-level annotator_* keys. The receipt must
+    pick those up so a hand-picked model joins by_task / task_redo."""
+    kwargs = _kwargs(model="openai/mimo-v2.6-pro", signals={
+        "policy": "skipped-not-fleet-group",
+        "annotator_session": "sess-dx",
+        "annotator_task": "mimo-trial",
+        "annotator_client": "cursor",
+    })
+    parts = usage_hook.extract_receipt_parts(kwargs, FakeResponse(FakeUsage(200, 30, 150)))
+    assert parts["task"] == "mimo-trial"
+    assert parts["session"] == "sess-dx"
+    assert parts["client"] == "cursor"
+    assert parts["kind"] is None
+    # Fleet `policy` dict wins over a stale annotation.
+    kwargs_both = _kwargs(
+        signals_policy={"session": "sess-fleet", "task": "fleet-task",
+                        "client": "aider", "kind": "code_gen"},
+        signals={"annotator_session": "sess-stale", "annotator_task": "stale"})
+    parts = usage_hook.extract_receipt_parts(kwargs_both, FakeResponse(FakeUsage(1, 1)))
+    assert parts["task"] == "fleet-task" and parts["session"] == "sess-fleet"
+
+
+def test_duration_seconds_derivation():
+    assert usage_hook._duration_seconds(100.0, 102.5) == 2.5
+    # datetimes and junk both tolerated
+    import datetime as _dt
+    start = _dt.datetime(2026, 1, 1, 12, 0, 0)
+    end = _dt.datetime(2026, 1, 1, 12, 0, 3)
+    assert usage_hook._duration_seconds(start, end) == 3.0
+    assert usage_hook._duration_seconds(None, None) is None
+    assert usage_hook._duration_seconds("a", "b") is None
+    assert usage_hook._duration_seconds(10.0, 5.0) is None   # negative
+    assert usage_hook._duration_seconds(0.0, 10 ** 7) is None  # absurd
+
+
+def test_record_receipt_persists_duration():
+    reset()
+    session = "sess-duration"
+    usage_state.record_receipt(
+        session=session, model="openai/mimo-v2.6-pro", kind=None, client="cursor",
+        prompt_tokens=1000, completion_tokens=50, cached_tokens=0,
+        duration_s=1.23456, est_cost_hkd=None)
+    lines = open(usage_state.USAGE_LOG_PATH, encoding="utf-8").read().splitlines()
+    record = json.loads(lines[-1])
+    assert record["duration_s"] == 1.235
+    # Absent timing writes null, not a fabricated zero (latency averages
+    # must count only timed receipts).
+    usage_state.record_receipt(
+        session=session, model="openai/mimo-v2.6-pro", kind=None, client="cursor",
+        prompt_tokens=10, completion_tokens=1)
+    assert json.loads(open(usage_state.USAGE_LOG_PATH, encoding="utf-8")
+                      .read().splitlines()[-1])["duration_s"] is None
+    # Negative/garbage durations clamp to null too.
+    usage_state.record_receipt(
+        session=session, model="openai/mimo-v2.6-pro", kind=None, client="cursor",
+        prompt_tokens=10, completion_tokens=1, duration_s=-3)
+    assert json.loads(open(usage_state.USAGE_LOG_PATH, encoding="utf-8")
+                      .read().splitlines()[-1])["duration_s"] is None
+
+
+def test_recorder_end_to_end_records_duration():
+    reset()
+    hook = usage_hook.UsageRecorder()
+    response = type("R", (), {"usage": {"prompt_tokens": 100, "completion_tokens": 5}})()
+    asyncio.run(hook.async_log_success_event(
+        _kwargs({"session": "sess-lat", "kind": "explain", "client": "other"}),
+        response, 1000.0, 1003.25))
+    lines = open(usage_state.USAGE_LOG_PATH, encoding="utf-8").read().splitlines()
+    assert json.loads(lines[-1])["duration_s"] == 3.25
+
+
+def test_escape_hatch_annotator_attaches_task_and_session():
+    """mimo-v2.6-pro (single-deployment group) skips routing but the receipt
+    must still carry task/session/client so the task comparison works."""
+    reset()
+    context = Context(ask("do the thing [[task:mimo-trial]]"),
+                      candidates=["openai/mimo-v2.6-pro"])
+    run(context)
+    signals = context.signals
+    assert signals["policy"] == "skipped-not-fleet-group"
+    assert signals["annotator_task"] == "mimo-trial"
+    assert isinstance(signals.get("annotator_session"), str)
+    assert signals["annotator_client"] == "unknown"  # no headers in the test Context
+
+    # Sticky across turns of the same session; [[task:]] clears.
+    second = Context(ask("continue the thing"),
+                     candidates=["openai/mimo-v2.6-pro"])
+    run(second)
+    assert second.signals["annotator_task"] == "mimo-trial"
+    third = Context(ask("done [[task:]]"), candidates=["openai/mimo-v2.6-pro"])
+    run(third)
+    assert third.signals.get("annotator_task") is None
+    # And the sticky map forgets it after the clear.
+    fourth = Context(ask("more work"), candidates=["openai/mimo-v2.6-pro"])
+    run(fourth)
+    assert fourth.signals.get("annotator_task") is None
+
+
+def test_escape_hatch_annotator_client_from_headers():
+    """Real Cursor calls arrive with nginx-stamped X-Client-Type; the
+    annotator must attribute them like the fleet path does."""
+    reset()
+    context = Context(ask("do the thing [[task:mimo-trial]]"),
+                      candidates=["openai/mimo-v2.6-pro"],
+                      metadata={"headers": {"X-Client-Type": "cursor"}})
+    run(context)
+    assert context.signals["annotator_client"] == "cursor"
+
+
+def test_escape_hatch_annotator_never_touches_routing():
+    """Candidate list is untouched and no policy dict is fabricated."""
+    reset()
+    candidates = ["openai/mimo-v2.6-pro"]
+    context = Context(ask("anything [[task:mimo-trial]]"), candidates=list(candidates))
+    run(context)
+    assert context.candidate_models == candidates
+    assert isinstance(context.signals["policy"], str)
 
 
 if __name__ == "__main__":

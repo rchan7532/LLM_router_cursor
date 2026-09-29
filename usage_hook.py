@@ -78,6 +78,24 @@ def _num(value: Any) -> int:
     return 0
 
 
+def _duration_seconds(start_time: Any, end_time: Any) -> float | None:
+    """Wall-clock seconds between litellm's callback timestamps. Accepts
+    floats (unix seconds) or datetimes; returns None when not derivable or
+    nonsensical (never invents a number)."""
+    try:
+        if isinstance(start_time, bool) or isinstance(end_time, bool):
+            return None
+        if isinstance(start_time, (int, float)) and isinstance(end_time, (int, float)):
+            delta = float(end_time) - float(start_time)
+        elif hasattr(start_time, "timestamp") and hasattr(end_time, "timestamp"):
+            delta = float(end_time.timestamp()) - float(start_time.timestamp())
+        else:
+            return None
+        return delta if 0.0 <= delta < 3600.0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def extract_receipt_parts(kwargs: Any, response_obj: Any) -> dict[str, Any] | None:
     """Pull everything needed for one receipt out of litellm's callback
     payload. Returns None when the response carries no usage at all (nothing
@@ -85,11 +103,20 @@ def extract_receipt_parts(kwargs: Any, response_obj: Any) -> dict[str, Any] | No
     if not isinstance(kwargs, Mapping):
         return None
 
-    policy = _get(kwargs, "litellm_params", "metadata", "routing_plugin_signals")
-    if isinstance(policy, Mapping):
-        policy = policy.get("policy")
+    signals = _get(kwargs, "litellm_params", "metadata", "routing_plugin_signals")
+    policy = signals.get("policy") if isinstance(signals, Mapping) else None
     if not isinstance(policy, Mapping):
         policy = {}
+    # Skip-path annotations (escape-hatch groups, e.g. mimo-v2.6-pro) arrive
+    # as TOP-LEVEL signal keys, not under "policy": the policy dict is never
+    # built there. Prefer the dict, fall back to the annotation so a direct
+    # call still gets session/task/client on its receipt.
+    def _signal(name: str) -> Any:
+        value = policy.get(name)
+        if isinstance(value, str) and value:
+            return value
+        fallback = signals.get("annotator_" + name) if isinstance(signals, Mapping) else None
+        return fallback if isinstance(fallback, str) and fallback else None
 
     usage = getattr(response_obj, "usage", None)
     if usage is None and isinstance(response_obj, Mapping):
@@ -120,10 +147,10 @@ def extract_receipt_parts(kwargs: Any, response_obj: Any) -> dict[str, Any] | No
 
     return {
         "model": model,
-        "session": policy.get("session") if isinstance(policy.get("session"), str) else None,
+        "session": _signal("session"),
         "kind": policy.get("kind") if isinstance(policy.get("kind"), str) else None,
-        "client": policy.get("client") if isinstance(policy.get("client"), str) else _client_from_headers(kwargs),
-        "task": policy.get("task") if isinstance(policy.get("task"), str) else None,
+        "client": _signal("client") or _client_from_headers(kwargs),
+        "task": _signal("task"),
         "est_cost_hkd": policy.get("est_cost_hkd"),
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -183,7 +210,8 @@ class UsageRecorder(CustomLogger if CustomLogger is not object else object):  # 
     changes routing, inert when POLICY_USAGE_RECORD=0 or usage_state is
     missing."""
 
-    def _record(self, kwargs: Any, response_obj: Any) -> None:
+    def _record(self, kwargs: Any, response_obj: Any,
+                start_time: Any = None, end_time: Any = None) -> None:
         if not RECORDING_ON or _usage is None:
             return
         parts = extract_receipt_parts(kwargs, response_obj)
@@ -199,6 +227,7 @@ class UsageRecorder(CustomLogger if CustomLogger is not object else object):  # 
             completion_tokens=parts["completion_tokens"],
             cached_tokens=parts["cached_tokens"],
             est_cost_hkd=parts["est_cost_hkd"],
+            duration_s=_duration_seconds(start_time, end_time),
             ts=time.time(),
         )
 
@@ -206,13 +235,13 @@ class UsageRecorder(CustomLogger if CustomLogger is not object else object):  # 
 
     def log_success_event(self, kwargs, response_obj, start_time, end_time):  # noqa: D102, ANN001
         try:
-            self._record(kwargs, response_obj)
+            self._record(kwargs, response_obj, start_time, end_time)
         except Exception:  # noqa: BLE001 - a broken receipt must not eat a response
             pass
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):  # noqa: D102, ANN001
         try:
-            self._record(kwargs, response_obj)
+            self._record(kwargs, response_obj, start_time, end_time)
         except Exception:  # noqa: BLE001
             pass
 

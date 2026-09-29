@@ -1388,6 +1388,7 @@ class CursorAutoPolicy:
             # Not the policy-governed group: either an unknown model, or one of
             # the direct escape-hatch groups the caller picked on purpose.
             _observe_skip_path(context, candidates)
+            _annotate_skip_path(context)
             context.signals["policy"] = "skipped-not-fleet-group"
             return context
 
@@ -1397,6 +1398,7 @@ class CursorAutoPolicy:
         metadata = dict(getattr(context, "metadata", {}) or {})
         signature = build_signature(messages)
         if signature is None:
+            _annotate_skip_path(context)
             context.signals["policy"] = "skipped-no-ask"
             return context
 
@@ -1999,6 +2001,61 @@ class CursorAutoPolicy:
             }
         )
         return context
+
+
+def _annotate_skip_path(context: Any) -> None:
+    """Measurement-only annotator for the non-fleet paths (escape-hatch groups
+    like mimo-v2.6-pro, and requests with no parseable ask).
+
+    The routing policy deliberately returns early here, but the receipt hook
+    still needs session/task/client so a hand-picked model can sit in the
+    same by_task / task_redo comparison as a policy-routed one. Runs the same
+    [[task:<slug>]] detector and keeps its own per-session tag map (the
+    policy's STATE.sessions is only written by the fleet path).
+
+    Writes TOP-LEVEL signal keys (annotator_task, annotator_session,
+    annotator_client) so the receipt's `policy` dict can never confuse an
+    annotation with a routing decision. Never touches candidate_models and
+    never raises - annotation must not break a request. Sticky tag expires
+    with the same TTL as policy sessions.
+    """
+    try:
+        signals = getattr(context, "signals", None)
+        if not isinstance(signals, dict):
+            return
+        messages = list(getattr(context, "structured_messages", []) or []) or list(
+            getattr(context, "raw_messages", []) or []
+        )
+        metadata = dict(getattr(context, "metadata", {}) or {})
+        STATE.prune()
+        session_key = STATE.session_key(messages, metadata)
+        ask_pair = _newest_human_ask(messages) if messages else None
+        ask_text = ask_pair[0] if ask_pair else ""
+        previous = _TAG_ONLY_SESSIONS.get(session_key) if session_key else None
+        # No parseable ask: keep the sticky tag rather than clearing it
+        # (same contract as _detect_task_tag on the fleet path).
+        task_tag = _detect_task_tag(ask_text, previous)
+        if session_key:
+            _TAG_ONLY_SESSIONS[session_key] = {"task_tag": task_tag, "ts": time.time()}
+            if len(_TAG_ONLY_SESSIONS) > SESSION_CAP:
+                for key, value in sorted(
+                    _TAG_ONLY_SESSIONS.items(), key=lambda item: item[1]["ts"]
+                )[: len(_TAG_ONLY_SESSIONS) - SESSION_CAP]:
+                    _TAG_ONLY_SESSIONS.pop(key, None)
+            for key, value in list(_TAG_ONLY_SESSIONS.items()):
+                if time.time() - value["ts"] > SESSION_TTL:
+                    _TAG_ONLY_SESSIONS.pop(key, None)
+            signals["annotator_session"] = session_key
+        if task_tag:
+            signals["annotator_task"] = task_tag
+        signals["annotator_client"] = _detect_client(metadata)
+    except Exception:  # noqa: BLE001 - annotation is optional by contract
+        pass
+
+
+# Sticky-task map for the annotator's own sessions. RAM-only, TTL-pruned,
+# bounded like PolicyState.sessions.
+_TAG_ONLY_SESSIONS: dict[str, dict[str, Any]] = {}
 
 
 def _observe_skip_path(context: Any, candidates: list) -> None:

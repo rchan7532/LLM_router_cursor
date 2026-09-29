@@ -640,6 +640,12 @@ def test_usage_by_task_and_redo():
          "client": "cursor", "task": None, "prompt_tokens": 10,
          "completion_tokens": 2, "cached_tokens": 0,
          "real_cost_hkd": 0.001, "est_cost_hkd": 0.002},
+        # Same task slug, different MODEL, same client: only by_task_model
+        # keeps these apart (the replacement comparison needs it).
+        {"ts": 4, "session": "s4", "model": "openai/mimo-v2.6-pro", "kind": "code_gen",
+         "client": "cursor", "task": "module-kit", "prompt_tokens": 500,
+         "completion_tokens": 50, "cached_tokens": 300, "duration_s": 2.5,
+         "real_cost_hkd": 0.004, "est_cost_hkd": None},
     ]
     with open(os.path.join(state.dir, "routing_usage.jsonl"), "w", encoding="utf-8") as handle:
         for record in records:
@@ -649,10 +655,24 @@ def test_usage_by_task_and_redo():
 
     def checks():
         data = _http_with_token("s3cr3t-token")("GET", "/usage")["summary"]
-        assert data["by_task"]["module-kit"]["cursor"]["calls"] == 1
-        assert data["by_task"]["module-kit"]["cursor"]["real_hkd"] == 0.01
+        # by_task keys (task, client), so both cursor records fold together.
+        assert data["by_task"]["module-kit"]["cursor"]["calls"] == 2
+        assert data["by_task"]["module-kit"]["cursor"]["real_hkd"] == 0.014
         assert data["by_task"]["module-kit"]["aider"]["real_hkd"] == 0.005
         assert data["task_redo"] == ["module-kit"]
+        # by_task_model splits the two models that ran module-kit.
+        row_flash = data["by_task_model"]["module-kit"]["openai/glm-5.3-flash"]
+        row_mimo = data["by_task_model"]["module-kit"]["openai/mimo-v2.6-pro"]
+        assert row_flash["calls"] == 2 and row_flash["real_hkd"] == 0.015
+        assert row_mimo["calls"] == 1 and row_mimo["real_hkd"] == 0.004
+        # by_model rows carry unit-economics + latency aggregates.
+        flash = data["by_model"]["openai/glm-5.3-flash"]
+        assert flash["prompt_tokens"] == 210 and flash["completion_tokens"] == 22
+        assert flash["cached_tokens"] == 0
+        assert "duration_s" not in flash  # no timed receipts: never invent 0
+        mimo = data["by_model"]["openai/mimo-v2.6-pro"]
+        assert mimo["prompt_tokens"] == 500 and mimo["cached_tokens"] == 300
+        assert mimo["duration_s"] == 2.5 and mimo["duration_calls"] == 1
 
     _run_service(service, checks)
 

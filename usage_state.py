@@ -189,6 +189,7 @@ def record_receipt(*, session: str | None, model: str, kind: str | None,
                    client: str | None, task: str | None = None,
                    prompt_tokens: int, completion_tokens: int,
                    cached_tokens: int = 0, est_cost_hkd: float | None = None,
+                   duration_s: float | None = None,
                    ts: float | None = None) -> float:
     """Record one usage receipt. Returns the real HKD for this call (0.0 for
     an unpriced model). Updates the durable log, the RAM aggregate, and the
@@ -198,10 +199,20 @@ def record_receipt(*, session: str | None, model: str, kind: str | None,
     task is a measurement-only label from routing_policy's [[task:<slug>]]
     directive. It never affects routing and defaults to None for all existing
     callers (fail-open).
+
+    duration_s is the upstream wall-clock latency in seconds (litellm passes
+    start/end times to the success callback). It is the latency-vs-cost
+    comparison signal: e.g. "glm-5.3-flash is cheaper per task but slower".
+    None when the timing is not derivable; never inferred.
     """
     now = time.time() if ts is None else ts
     real = real_cost_hkd(model, prompt_tokens, completion_tokens, cached_tokens)
     task_value = task if isinstance(task, str) and task else None
+    duration_value: float | None = None
+    if isinstance(duration_s, (int, float)) and not isinstance(duration_s, bool):
+        duration_value = round(float(duration_s), 3)
+        if duration_value < 0:
+            duration_value = None
     record = {
         "ts": now,
         "session": session,
@@ -214,6 +225,7 @@ def record_receipt(*, session: str | None, model: str, kind: str | None,
         "cached_tokens": _int(cached_tokens),
         "real_cost_hkd": round(real, 6),
         "est_cost_hkd": round(float(est_cost_hkd), 6) if est_cost_hkd is not None else None,
+        "duration_s": duration_value,
     }
     with _WRITE_LOCK:
         _append_receipt_locked(record)

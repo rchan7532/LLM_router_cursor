@@ -394,7 +394,13 @@ def usage_summary(limit: int = 2000) -> dict[str, Any]:
     Returns the real billed HKD vs the pre-call estimate, broken down per
     model, per client (aider/cursor/...), per task kind, and per task slug
     (with a redo flag when the same slug appears under multiple clients),
-    over the newest `limit` receipts. This is what closes the dashboard-vs-bill gap: the
+    over the newest `limit` receipts. Each by_model row also carries prompt/
+    completion/cached token totals and summed upstream latency (duration_s
+    over duration_calls), so unit economics and latency are readable without
+    raw-log math. `by_task_model` is the sibling of `by_task` keyed by model
+    instead of client: the model-replacement comparison must not merge two
+    models that ran the same task under the same client. This is what closes
+    the dashboard-vs-bill gap: the
     estimate column sums est_cost_hkd (worst-case, uncached); the actual
     column sums real_cost_hkd (cached reads at the discount rate). If the
     receipts log is absent the totals read as zero and `present` is false,
@@ -414,9 +420,14 @@ def usage_summary(limit: int = 2000) -> dict[str, Any]:
         "by_client": {},
         "by_kind": {},
         "by_task": {},
+        "by_task_model": {},
         "task_redo": [],
     }
     by_task_flat: dict[tuple[str, str], dict[str, Any]] = {}
+    # Per-(task, model) rollup: the model-replacement comparison ("same task
+    # on mimo-v2.6-pro vs glm-5.3-flash") must not merge two models that ran
+    # under the same client. Sibling of by_task, not a replacement.
+    by_task_model_flat: dict[tuple[str, str], dict[str, Any]] = {}
     task_clients: dict[str, set[str]] = {}
 
     def _bump(table: dict[Any, dict[str, Any]], key: Any, real: float, est: float) -> None:
@@ -435,19 +446,39 @@ def usage_summary(limit: int = 2000) -> dict[str, Any]:
         client = record.get("client") if isinstance(record.get("client"), str) else "unknown"
         kind = record.get("kind") if isinstance(record.get("kind"), str) else "unknown"
         task = record.get("task") if isinstance(record.get("task"), str) else None
+        prompt = int(record.get("prompt_tokens") or 0)
+        completion = int(record.get("completion_tokens") or 0)
+        cached = int(record.get("cached_tokens") or 0)
+        raw_duration = record.get("duration_s")
+        duration = (float(raw_duration)
+                    if isinstance(raw_duration, (int, float))
+                    and not isinstance(raw_duration, bool) else None)
         totals["real_hkd"] = round(totals["real_hkd"] + real, 6)
         totals["est_hkd"] = round(totals["est_hkd"] + est, 6)
-        totals["prompt_tokens"] += int(record.get("prompt_tokens") or 0)
-        totals["completion_tokens"] += int(record.get("completion_tokens") or 0)
-        totals["cached_tokens"] += int(record.get("cached_tokens") or 0)
+        totals["prompt_tokens"] += prompt
+        totals["completion_tokens"] += completion
+        totals["cached_tokens"] += cached
         _bump(totals["by_model"], model, real, est)
+        # Per-model unit economics (cost per 1M tokens is read off these) and
+        # upstream latency: the replacement question "is mimo-v2.6-pro worth
+        # it against glm-5.3-flash?" needs both, per model, side by side.
+        row = totals["by_model"][model]
+        row["prompt_tokens"] = int(row.get("prompt_tokens", 0)) + prompt
+        row["completion_tokens"] = int(row.get("completion_tokens", 0)) + completion
+        row["cached_tokens"] = int(row.get("cached_tokens", 0)) + cached
+        if duration is not None:
+            row["duration_s"] = round(float(row.get("duration_s", 0.0)) + duration, 3)
+            row["duration_calls"] = int(row.get("duration_calls", 0)) + 1
         _bump(totals["by_client"], client, real, est)
         _bump(totals["by_kind"], kind, real, est)
         if task is not None:
             _bump(by_task_flat, (task, client), real, est)
+            _bump(by_task_model_flat, (task, model), real, est)
             task_clients.setdefault(task, set()).add(client)
     for (task, client), row in by_task_flat.items():
         totals["by_task"].setdefault(task, {})[client] = row
+    for (task, model), row in by_task_model_flat.items():
+        totals["by_task_model"].setdefault(task, {})[model] = row
     totals["task_redo"] = sorted(task for task, clients in task_clients.items() if len(clients) >= 2)
     return totals
 
