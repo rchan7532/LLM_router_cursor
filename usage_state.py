@@ -58,6 +58,13 @@ PRICING: dict[str, tuple[float, float, float]] = {
     "openai/kimi-k2.7-code": (0.77, 3.22, 0.077),
     "openai/glm-5.3": (1.13, 3.54, 0.113),
     "openai/claude-haiku-4-5": (1.01, 5.03, 0.101),
+    # Escape hatches (not in PROFILES, never auto-picked). Prices from the
+    # operators' published lists, 2026-09-29:
+    #   glm-5.3-flashx: HKD list (2.355 in / 8.2425 out per 1M) at 7.8 HKD/USD.
+    #   mimo-v2.6-pro: USD list; cache READ is 0.0018 (NOT in/10 - the
+    #     provider prices cache writes separately at the full input rate).
+    "openai/glm-5.3-flashx": (0.302, 1.057, 0.0302),
+    "openai/mimo-v2.6-pro": (0.2175, 0.435, 0.0018),
 }
 
 

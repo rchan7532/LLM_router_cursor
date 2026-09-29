@@ -227,6 +227,31 @@ model_list:
     model_info:
       supports_vision: false
 
+  # ---------------------------------------------------------------------
+  # Speed escape hatches (2026-09-29): single-model groups the policy skips
+  # (< 2 distinct models), so they route exactly as named and are never
+  # auto-picked into cursor-auto. glm-5.3-flashx is ToAI-billed (company);
+  # mimo-v2.6-pro runs on the operator's personal key (personal cost).
+  # Receipts price both via usage_state.PRICING.
+  # ---------------------------------------------------------------------
+  - model_name: glm-5.3-flashx
+    litellm_params:
+      model: openai/glm-5.3-flashx
+      api_key: os.environ/ROUTER_KEY_DEFAULT
+      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      timeout: 600
+    model_info:
+      supports_vision: true
+
+  - model_name: mimo
+    litellm_params:
+      model: openai/mimo-v2.6-pro
+      api_key: os.environ/MIMO_KEY
+      api_base: os.environ/MIMO_BASE
+      timeout: 600
+    model_info:
+      supports_vision: false
+
 # ---------------------------------------------------------------------
 # The policy plugin. Resolved relative to this file, so routing_policy.py
 # must sit next to litellm-config.yaml (and be mounted into the container).
