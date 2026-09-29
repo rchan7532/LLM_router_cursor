@@ -1388,7 +1388,9 @@ class CursorAutoPolicy:
             # Not the policy-governed group: either an unknown model, or one of
             # the direct escape-hatch groups the caller picked on purpose.
             _observe_skip_path(context, candidates)
-            _annotate_skip_path(context)
+            direct_model = next(
+                (str(c) for c in candidates if isinstance(c, str) and c), None)
+            _annotate_skip_path(context, served_by=direct_model)
             context.signals["policy"] = "skipped-not-fleet-group"
             return context
 
@@ -1449,8 +1451,12 @@ class CursorAutoPolicy:
 
         # Resolve the per-session task tag from the newest human ask. The tag
         # is measurement-only: it never affects gates, selection, or alarms.
-        task_tag = _detect_task_tag(signature.text, previous)
+        task_tag = _detect_task_tag(signature.text, _task_previous(session_key))
         signature.task_tag = task_tag
+        # Switch-back flag (one-sided mimo trial): set when this fleet turn
+        # follows an escape-hatch turn in the same session. Fires once per
+        # abandonment (see _switch_back_from). Measurement-only.
+        switch_back_from = _switch_back_from(session_key, previous)
 
         # ---- stale-ask execution demotion --------------------------------
         # The newest human ask has driven >= EXEC_PHASE_TURNS turns with tool
@@ -1933,6 +1939,7 @@ class CursorAutoPolicy:
             "stall": signature.stall,
             "directives": sorted(signature.directives),
             "task": task_tag,
+            "switch_back_from": switch_back_from,
             "session": session_key,
             "client": client,
             "spend_hkd": round(STATE.session_spend(session_key), 4),
@@ -2003,21 +2010,26 @@ class CursorAutoPolicy:
         return context
 
 
-def _annotate_skip_path(context: Any) -> None:
+def _annotate_skip_path(context: Any, served_by: str | None = None) -> None:
     """Measurement-only annotator for the non-fleet paths (escape-hatch groups
     like mimo-v2.6-pro, and requests with no parseable ask).
 
     The routing policy deliberately returns early here, but the receipt hook
     still needs session/task/client so a hand-picked model can sit in the
     same by_task / task_redo comparison as a policy-routed one. Runs the same
-    [[task:<slug>]] detector and keeps its own per-session tag map (the
-    policy's STATE.sessions is only written by the fleet path).
+    [[task:<slug>]] detector and keeps the sticky tag in _TAG_ONLY_SESSIONS,
+    which _task_previous merges with the fleet path's records so a tag
+    survives switching picker mid-chat (the one-sided mimo trial does exactly
+    that).
+
+    served_by is the direct group's model when this call bypassed the fleet
+    (None on the no-ask fleet path). It powers the switch-back detector: the
+    next fleet turn that finds this record newest flags the abandonment.
 
     Writes TOP-LEVEL signal keys (annotator_task, annotator_session,
     annotator_client) so the receipt's `policy` dict can never confuse an
     annotation with a routing decision. Never touches candidate_models and
-    never raises - annotation must not break a request. Sticky tag expires
-    with the same TTL as policy sessions.
+    never raises - annotation must not break a request.
     """
     try:
         signals = getattr(context, "signals", None)
@@ -2031,12 +2043,28 @@ def _annotate_skip_path(context: Any) -> None:
         session_key = STATE.session_key(messages, metadata)
         ask_pair = _newest_human_ask(messages) if messages else None
         ask_text = ask_pair[0] if ask_pair else ""
-        previous = _TAG_ONLY_SESSIONS.get(session_key) if session_key else None
+        previous = _task_previous(session_key)
         # No parseable ask: keep the sticky tag rather than clearing it
         # (same contract as _detect_task_tag on the fleet path).
         task_tag = _detect_task_tag(ask_text, previous)
         if session_key:
-            _TAG_ONLY_SESSIONS[session_key] = {"task_tag": task_tag, "ts": time.time()}
+            own = _TAG_ONLY_SESSIONS.get(session_key)
+            carried = own.get("served_by") if isinstance(own, Mapping) else None
+            now = time.time()
+            entry: dict[str, Any] = {
+                "task_tag": task_tag,
+                "ts": now,
+                "served_by": served_by if isinstance(served_by, str) else (
+                    carried if isinstance(carried, str) else None),
+                # served_ts marks the last ESCAPE-HATCH turn only. Fleet
+                # no-ask calls update ts (tag bookkeeping) but must not bump
+                # served_ts, or every later fleet turn would re-flag a stale
+                # switch-back. The fleet decision's STATE.sessions ts is the
+                # clock the flag compares against, so it fires exactly once.
+                "served_ts": (now if isinstance(served_by, str)
+                              else (own.get("served_ts", 0) if isinstance(own, Mapping) else 0)),
+            }
+            _TAG_ONLY_SESSIONS[session_key] = entry
             if len(_TAG_ONLY_SESSIONS) > SESSION_CAP:
                 for key, value in sorted(
                     _TAG_ONLY_SESSIONS.items(), key=lambda item: item[1]["ts"]
@@ -2054,8 +2082,61 @@ def _annotate_skip_path(context: Any) -> None:
 
 
 # Sticky-task map for the annotator's own sessions. RAM-only, TTL-pruned,
-# bounded like PolicyState.sessions.
+# bounded like PolicyState.sessions. Records: {task_tag, ts, served_by}.
 _TAG_ONLY_SESSIONS: dict[str, dict[str, Any]] = {}
+
+
+def _task_previous(session_key: str | None) -> Mapping[str, Any] | None:
+    """Newest sticky-task record for a session, whichever route stored it.
+
+    Both paths must see one tag: STATE.sessions (fleet) and
+    _TAG_ONLY_SESSIONS (escape-hatch annotator) each update on their own
+    turns, so pick whichever record is newer and expose its task_tag."""
+    if not session_key:
+        return None
+    records: list[Mapping[str, Any]] = []
+    for source in (_TAG_ONLY_SESSIONS.get(session_key), STATE.sessions.get(session_key)):
+        if isinstance(source, Mapping):
+            records.append(source)
+    if not records:
+        return None
+    newest = max(records, key=lambda rec: float(rec.get("ts", 0) or 0))
+    tag = newest.get("task_tag")
+    return {"task_tag": tag if isinstance(tag, str) and tag else None}
+
+
+def _switch_back_from(session_key: str | None,
+                      previous: Mapping[str, Any] | None) -> str | None:
+    """Model this session abandoned to return to the fleet mid-task.
+
+    True when served_ts (the annotator's last escape-hatch turn) is newer
+    than the fleet's own STATE.sessions record for the same session. Fires
+    exactly once: the flagged fleet turn writes a fresh STATE.sessions ts,
+    and later fleet turns compare against that. Same-session only:
+    cross-chat switches share no session key (accepted limitation, review
+    m9). Measurement-only: it lands on the decision record and the usage
+    receipt, never on gates or selection."""
+    if not session_key:
+        return None
+    own = _TAG_ONLY_SESSIONS.get(session_key)
+    if not isinstance(own, Mapping):
+        return None
+    served_by = own.get("served_by")
+    if not isinstance(served_by, str) or not served_by:
+        return None
+    try:
+        served_ts = float(own.get("served_ts", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if served_ts <= 0:
+        return None
+    fleet_ts = 0.0
+    if isinstance(previous, Mapping):
+        try:
+            fleet_ts = float(previous.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            fleet_ts = 0.0
+    return served_by if served_ts > fleet_ts else None
 
 
 def _observe_skip_path(context: Any, candidates: list) -> None:

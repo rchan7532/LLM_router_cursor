@@ -639,6 +639,7 @@ def test_usage_by_task_and_redo():
         {"ts": 3, "session": "s3", "model": "openai/glm-5.3-flash", "kind": "factual",
          "client": "cursor", "task": None, "prompt_tokens": 10,
          "completion_tokens": 2, "cached_tokens": 0,
+         "switch_back_from": "openai/mimo-v2.6-pro",
          "real_cost_hkd": 0.001, "est_cost_hkd": 0.002},
         # Same task slug, different MODEL, same client: only by_task_model
         # keeps these apart (the replacement comparison needs it).
@@ -673,6 +674,8 @@ def test_usage_by_task_and_redo():
         mimo = data["by_model"]["openai/mimo-v2.6-pro"]
         assert mimo["prompt_tokens"] == 500 and mimo["cached_tokens"] == 300
         assert mimo["duration_s"] == 2.5 and mimo["duration_calls"] == 1
+        # switch-backs counted per abandoned model.
+        assert data["switch_backs"] == {"openai/mimo-v2.6-pro": 1}
 
     _run_service(service, checks)
 

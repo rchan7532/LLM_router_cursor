@@ -257,6 +257,7 @@ def _run_step(step):
 
 def _reset_state():
     policy.STATE = policy.PolicyState()
+    policy._TAG_ONLY_SESSIONS.clear()
     policy.CONTROL = None
     policy.LEARN_ENABLED = True
     policy.LEARNER = None

@@ -187,6 +187,7 @@ def _append_receipt_locked(record: dict[str, Any]) -> None:
 
 def record_receipt(*, session: str | None, model: str, kind: str | None,
                    client: str | None, task: str | None = None,
+                   switch_back_from: str | None = None,
                    prompt_tokens: int, completion_tokens: int,
                    cached_tokens: int = 0, est_cost_hkd: float | None = None,
                    duration_s: float | None = None,
@@ -200,6 +201,10 @@ def record_receipt(*, session: str | None, model: str, kind: str | None,
     directive. It never affects routing and defaults to None for all existing
     callers (fail-open).
 
+    switch_back_from is the direct model whose escape-hatch turn this fleet
+    receipt follows in the same session (the one-sided trial's abandonment
+    flag). None unless the policy set it.
+
     duration_s is the upstream wall-clock latency in seconds (litellm passes
     start/end times to the success callback). It is the latency-vs-cost
     comparison signal: e.g. "glm-5.3-flash is cheaper per task but slower".
@@ -208,6 +213,7 @@ def record_receipt(*, session: str | None, model: str, kind: str | None,
     now = time.time() if ts is None else ts
     real = real_cost_hkd(model, prompt_tokens, completion_tokens, cached_tokens)
     task_value = task if isinstance(task, str) and task else None
+    switch_value = switch_back_from if isinstance(switch_back_from, str) and switch_back_from else None
     duration_value: float | None = None
     if isinstance(duration_s, (int, float)) and not isinstance(duration_s, bool):
         duration_value = round(float(duration_s), 3)
@@ -220,6 +226,7 @@ def record_receipt(*, session: str | None, model: str, kind: str | None,
         "kind": kind,
         "client": client,
         "task": task_value,
+        "switch_back_from": switch_value,
         "prompt_tokens": _int(prompt_tokens),
         "completion_tokens": _int(completion_tokens),
         "cached_tokens": _int(cached_tokens),

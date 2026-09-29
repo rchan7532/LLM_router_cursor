@@ -60,6 +60,7 @@ def run(context):
 
 def reset():
     policy.STATE = policy.PolicyState()
+    policy._TAG_ONLY_SESSIONS.clear()
     # A clean control view: no control.json (no lease/budget), pristine
     # learned (no bar bias / persisted trust). default_store() reads
     # POLICY_STATE_DIR, which an earlier test file (test_control) repoints at
@@ -503,6 +504,39 @@ def test_escape_hatch_annotator_client_from_headers():
                       metadata={"headers": {"X-Client-Type": "cursor"}})
     run(context)
     assert context.signals["annotator_client"] == "cursor"
+
+
+def test_task_tag_survives_picker_switch():
+    """One-sided trial flow: mimo arm first, then cursor-auto in the SAME
+    chat. The sticky tag must cross routes (shared _task_previous view)."""
+    reset()
+    direct = Context(ask("start the task [[task:mimo-trial]]", first="seed tag"),
+                     candidates=["openai/mimo-v2.6-pro"])
+    run(direct)
+    assert direct.signals["annotator_task"] == "mimo-trial"
+    fleet = Context(ask("continue", first="seed tag"))
+    run(fleet)
+    assert fleet.signals["policy"]["task"] == "mimo-trial"
+    assert fleet.signals["policy"]["switch_back_from"] == "openai/mimo-v2.6-pro"
+
+
+def test_switch_back_flag_fires_once():
+    reset()
+    direct = Context(ask("start the task", first="seed switch"),
+                     candidates=["openai/mimo-v2.6-pro"])
+    run(direct)
+    back = Context(ask("continue", first="seed switch"))
+    run(back)
+    assert back.signals["policy"]["switch_back_from"] == "openai/mimo-v2.6-pro"
+    # Second fleet turn: the flag must NOT repeat (comparing against the
+    # fleet's own fresh STATE.sessions ts).
+    again = Context(ask("more work", first="seed switch"))
+    run(again)
+    assert again.signals["policy"]["switch_back_from"] is None
+    # And a pure-fleet session never flags.
+    clean = Context(ask("fresh work", first="seed clean"))
+    run(clean)
+    assert clean.signals["policy"]["switch_back_from"] is None
 
 
 def test_escape_hatch_annotator_never_touches_routing():

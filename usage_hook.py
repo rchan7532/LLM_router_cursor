@@ -151,6 +151,8 @@ def extract_receipt_parts(kwargs: Any, response_obj: Any) -> dict[str, Any] | No
         "kind": policy.get("kind") if isinstance(policy.get("kind"), str) else None,
         "client": _signal("client") or _client_from_headers(kwargs),
         "task": _signal("task"),
+        "switch_back_from": (policy.get("switch_back_from")
+                             if isinstance(policy.get("switch_back_from"), str) else None),
         "est_cost_hkd": policy.get("est_cost_hkd"),
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -223,6 +225,7 @@ class UsageRecorder(CustomLogger if CustomLogger is not object else object):  # 
             kind=parts["kind"],
             client=parts["client"],
             task=parts["task"],
+            switch_back_from=parts.get("switch_back_from"),
             prompt_tokens=parts["prompt_tokens"],
             completion_tokens=parts["completion_tokens"],
             cached_tokens=parts["cached_tokens"],

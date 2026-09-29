@@ -422,6 +422,11 @@ def usage_summary(limit: int = 2000) -> dict[str, Any]:
         "by_task": {},
         "by_task_model": {},
         "task_redo": [],
+        # One-sided trial signal: {model: count} of fleet receipts flagged as
+        # returning from that direct model mid-task (see _switch_back_from).
+        # Frequent switches = the trial model is being abandoned = quality or
+        # latency complaint. Absent key reads as zero.
+        "switch_backs": {},
     }
     by_task_flat: dict[tuple[str, str], dict[str, Any]] = {}
     # Per-(task, model) rollup: the model-replacement comparison ("same task
@@ -475,6 +480,9 @@ def usage_summary(limit: int = 2000) -> dict[str, Any]:
             _bump(by_task_flat, (task, client), real, est)
             _bump(by_task_model_flat, (task, model), real, est)
             task_clients.setdefault(task, set()).add(client)
+        switched = record.get("switch_back_from")
+        if isinstance(switched, str) and switched:
+            totals["switch_backs"][switched] = int(totals["switch_backs"].get(switched, 0)) + 1
     for (task, client), row in by_task_flat.items():
         totals["by_task"].setdefault(task, {})[client] = row
     for (task, model), row in by_task_model_flat.items():

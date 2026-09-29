@@ -218,6 +218,9 @@
       });
     if (taskModels.length) parts.push('By task × model: ' + taskModels.join(' · '));
     const redo = new Set(summary.task_redo || []);
+    const switchBacks = Object.entries(summary.switch_backs || {})
+      .map(([m, n]) => `${modelShort(m)} ×${n}`);
+    if (switchBacks.length) parts.push('Switch-backs (abandoned mid-task): ' + switchBacks.join(' · '));
     const taskParts = Object.entries(summary.by_task || {})
       .map(([slug, clients]) => {
         const total = Object.values(clients).reduce((s, v) => s + v.real_hkd, 0);
