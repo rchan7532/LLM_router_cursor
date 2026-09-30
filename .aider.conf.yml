@@ -1,7 +1,8 @@
 # Aider configuration - llm-router repo
 # Docs: https://aider.chat/docs/config.html
 # Env (set in your shell before launch, NOT here - secrets never go in git):
-#   OPENAI_API_BASE = https://router.ifmphk.com/24b8fa195657da6bc97495e5e28051b304bded55446933a5/v1
+#   OPENAI_API_BASE = https://router.ifmphk.com/<MAIN_PATH_TOKEN>/v1
+#   (live token: MAIN_PATH_TOKEN in the VPS .env; do not write it into git)
 #   OPENAI_API_KEY  = <ROUTER_KEY_DEFAULT from the VPS .env>
 
 model: openai/cursor-auto

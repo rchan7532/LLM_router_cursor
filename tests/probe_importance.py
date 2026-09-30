@@ -15,7 +15,7 @@ with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
             key, value = line.split("=", 1)
             env[key.strip()] = value.strip()
 
-TOKEN = "24b8fa195657da6bc97495e5e28051b304bded55446933a5"
+TOKEN = env["MAIN_PATH_TOKEN"]
 MK = env["LITELLM_MASTER_KEY"]
 BASE = f"https://router.ifmphk.com/{TOKEN}/v1"
 

@@ -13,7 +13,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
 done
 set -a; source <(sed 's/\r$//' .env); set +a
 SEED="switchback-probe-20260929"
-BASE=https://router.ifmphk.com/24b8fa195657da6bc97495e5e28051b304bded55446933a5/v1/chat/completions
+BASE=https://router.ifmphk.com/${MAIN_PATH_TOKEN}/v1/chat/completions
 echo "=== turn 1: escape hatch (mimo) in session ==="
 curl -s -m 60 "$BASE" -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H "Content-Type: application/json" \
   -H "X-Client-Type: cursor" \

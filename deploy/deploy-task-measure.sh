@@ -14,7 +14,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
 done
 echo "=== tagged escape-hatch call (expect task=mimo-trial in receipt) ==="
 set -a; source <(sed 's/\r$//' .env); set +a
-curl -s -m 60 https://router.ifmphk.com/24b8fa195657da6bc97495e5e28051b304bded55446933a5/v1/chat/completions \
+curl -s -m 60 https://router.ifmphk.com/${MAIN_PATH_TOKEN}/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H "Content-Type: application/json" \
   -H "X-Client-Type: cursor" \
   -d '{"model":"mimo-v2.6-pro","messages":[{"role":"user","content":"say hi [[task:mimo-trial]]"}],"max_tokens":3}' | head -c 150
@@ -36,6 +36,6 @@ print('--- by_task_model ---')
 print(json.dumps(d.get('by_task_model', {}), indent=1))
 "
 echo "=== fleet group unaffected (cursor-auto) ==="
-curl -s https://router.ifmphk.com/24b8fa195657da6bc97495e5e28051b304bded55446933a5/v1/chat/completions \
+curl -s https://router.ifmphk.com/${MAIN_PATH_TOKEN}/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H "Content-Type: application/json" \
   -d '{"model":"cursor-auto","messages":[{"role":"user","content":"say ok"}],"max_tokens":4}' -o /dev/null -w "cursor-auto http=%{http_code}\n"

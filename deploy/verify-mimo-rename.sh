@@ -7,12 +7,12 @@ echo "=== container up ==="
 docker ps --format '{{.Names}} {{.Status}}' | grep llm-router
 echo "=== probe mimo-v2.6-pro through proxy (public endpoint) ==="
 set -a; source <(sed 's/\r$//' .env); set +a
-curl -s -m 60 https://router.ifmphk.com/24b8fa195657da6bc97495e5e28051b304bded55446933a5/v1/chat/completions \
+curl -s -m 60 https://router.ifmphk.com/${MAIN_PATH_TOKEN}/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H "Content-Type: application/json" \
   -d '{"model":"mimo-v2.6-pro","messages":[{"role":"user","content":"hi"}],"max_tokens":3}' | head -c 300
 echo
 echo "=== probe old name mimo (should 400/404) ==="
-curl -s -m 30 https://router.ifmphk.com/24b8fa195657da6bc97495e5e28051b304bded55446933a5/v1/chat/completions \
+curl -s -m 30 https://router.ifmphk.com/${MAIN_PATH_TOKEN}/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H "Content-Type: application/json" \
   -d '{"model":"mimo","messages":[{"role":"user","content":"hi"}],"max_tokens":3}' | head -c 200
 echo

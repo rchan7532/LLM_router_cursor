@@ -15,7 +15,7 @@ def env_of(name):
                 return line.split("=", 1)[1].strip()
     return ""
 
-TOKEN = "24b8fa195657da6bc97495e5e28051b304bded55446933a5"
+TOKEN = env_of("MAIN_PATH_TOKEN")
 CT = env_of("CONTROL_TOKEN")
 MK = env_of("LITELLM_MASTER_KEY")
 

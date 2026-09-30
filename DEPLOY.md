@@ -124,10 +124,12 @@ Expect the model ids including `cursor-auto`.
 
 ## Step 6 - nginx + Let's Encrypt
 
-> **Already done on this VPS (2026-09-21).** DNS, the nginx server block, and
-> the certificate are live; the path token in the config is
-> `24b8fa195657da6bc97495e5e28051b304bded55446933a5`. Keep this section for
-> rebuilds; skip to Step 7 for verification.
+> **Already done on this VPS.** DNS, the nginx server block, and the
+> certificate are live; the path tokens were rotated 2026-09-29 after
+> leaking via this public repo's history (see `_rotate_tokens.sh`). Live
+> values: `/root/.router-path-tokens` on the VPS and `MAIN_PATH_TOKEN` in
+> `/opt/llm-router/.env`. Keep this section for rebuilds; skip to Step 7 for
+> verification.
 
 The VPS runs nginx (it already serves ifmphk.com / direct.ifmphk.com), so
 nginx — not Caddy — fronts the router. The server block in
@@ -148,8 +150,11 @@ ln -sf /etc/nginx/sites-available/router.ifmphk.com /etc/nginx/sites-enabled/
 ```
 
 **Set the token before use.** Replace both occurrences of
-`24b8fa195657da6bc97495e5e28051b304bded55446933a5` in the config with a long
-random string (`openssl rand -hex 24`). It becomes part of Cursor's base URL.
+`__MAIN_PATH_TOKEN__` in the config with a long random string
+(`openssl rand -hex 24`); do the same for `__AIDER_PATH_TOKEN__` if you use
+the aider route. It becomes part of Cursor's base URL. Never commit the real
+values — record them in `/root/.router-path-tokens` (root-only) and in
+`/opt/llm-router/.env` as `MAIN_PATH_TOKEN`.
 
 Then request the certificate (HTTP block must be live first):
 
