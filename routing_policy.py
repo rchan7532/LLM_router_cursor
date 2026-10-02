@@ -396,10 +396,10 @@ BASE_BAR: dict[str, float] = {
     "refactor": 0.75,
     "debug": 0.75,
     "review": 0.70,
-    # 0.82: at every importance tier only qwen3.8-max-0902 (0.92) clears;
-    # glm-5.3's cap was cut to 0.70 on 2026-10-02 trust evidence (57 design
-    # observations, sum -4.04 - the table says it fails design turns).
-    "design": 0.82,
+    # 0.92: only qwen3.8-max-0902 (0.92) clears even at the learner's max
+    # negative bias (0.92-0.10=0.82; glm-5.3 0.70 and kimi 0.70 stay out).
+    # Trust evidence: glm-5.3 57 design obs sum -4.04, kimi 9 obs sum -0.65.
+    "design": 0.92,
     "explain": 0.55,
     "bulk": 0.50,
     "writing": 0.55,
@@ -527,7 +527,7 @@ PROFILES: dict[str, Profile] = {
         latency=1,
         cap={
             "code_edit": 0.86, "code_gen": 0.90, "refactor": 0.88, "debug": 0.90,
-            "review": 0.90, "design": 0.72, "explain": 0.72, "bulk": 0.70,
+            "review": 0.90, "design": 0.70, "explain": 0.72, "bulk": 0.70,
             "writing": 0.70, "factual": 0.70, "agentic": 0.90,
         },
         strengths=("code_gen", "refactor", "debug", "review", "agentic"),
