@@ -396,7 +396,10 @@ BASE_BAR: dict[str, float] = {
     "refactor": 0.75,
     "debug": 0.75,
     "review": 0.70,
-    "design": 0.80,
+    # 0.82: at every importance tier only qwen3.8-max-0902 (0.92) clears;
+    # glm-5.3's cap was cut to 0.70 on 2026-10-02 trust evidence (57 design
+    # observations, sum -4.04 - the table says it fails design turns).
+    "design": 0.82,
     "explain": 0.55,
     "bulk": 0.50,
     "writing": 0.55,
@@ -523,12 +526,27 @@ PROFILES: dict[str, Profile] = {
         cost_out=3.22,
         latency=1,
         cap={
-            "code_edit": 0.86, "code_gen": 0.90, "refactor": 0.90, "debug": 0.88,
-            "review": 0.84, "design": 0.70, "explain": 0.72, "bulk": 0.70,
+            "code_edit": 0.86, "code_gen": 0.90, "refactor": 0.88, "debug": 0.90,
+            "review": 0.90, "design": 0.72, "explain": 0.72, "bulk": 0.70,
             "writing": 0.70, "factual": 0.70, "agentic": 0.90,
         },
-        strengths=("code_gen", "refactor", "debug", "agentic"),
+        strengths=("code_gen", "refactor", "debug", "review", "agentic"),
         weak=("writing", "factual", "design"),
+    ),
+    "openai/qwen3.8-max-0902": Profile(
+        model="openai/qwen3.8-max-0902",
+        vision=False,
+        ctx_window=262_000,
+        cost_in=1.61025641025641,
+        cost_out=4.83076923076923,
+        latency=2,
+        cap={
+            "code_edit": 0.82, "code_gen": 0.80, "refactor": 0.85, "debug": 0.82,
+            "review": 0.84, "design": 0.92, "explain": 0.78, "bulk": 0.70,
+            "writing": 0.72, "factual": 0.72, "agentic": 0.78,
+        },
+        strengths=("design", "refactor", "review"),
+        weak=("agentic", "bulk", "factual"),
     ),
     "openai/glm-5.3": Profile(
         model="openai/glm-5.3",
@@ -539,10 +557,11 @@ PROFILES: dict[str, Profile] = {
         latency=1,
         cap={
             "code_edit": 0.85, "code_gen": 0.85, "refactor": 0.84, "debug": 0.86,
-            "review": 0.86, "design": 0.88, "explain": 0.85, "bulk": 0.80,
+            "review": 0.86, "design": 0.70, "explain": 0.85, "bulk": 0.80,
             "writing": 0.85, "factual": 0.85, "agentic": 0.88,
         },
-        strengths=("design", "debug", "review", "agentic"),
+        strengths=("debug", "review", "agentic"),
+        weak=("design",),
     ),
     "openai/claude-haiku-4-5": Profile(
         model="openai/claude-haiku-4-5",

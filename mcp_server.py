@@ -59,6 +59,7 @@ FLEET = (
     "openai/qwen3.8-flash",
     "openai/deepseek-v4.1-flash",
     "openai/kimi-k2.7-code",
+    "openai/qwen3.8-max-0902",
     "openai/glm-5.3",
     "openai/claude-haiku-4-5",
 )

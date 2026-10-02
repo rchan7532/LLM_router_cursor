@@ -70,8 +70,8 @@ PRICING: dict[str, tuple[float, float, float]] = {
     #   qwen3.8-max-0902: 12.56 in / 37.68 out per 1M (cache rate unconfirmed;
     #     assumed in/10 like every other entry until the operator states it)
     "openai/kimi-k3": (2.3912, 11.9481, 0.2415),
-    "openai/qwen3.8-max": (1.6103, 4.8308, 0.1610),
-    "openai/qwen3.8-max-0902": (1.6103, 4.8308, 0.1610),
+    "openai/qwen3.8-max": (1.61025641025641, 4.83076923076923, 0.16102564102564),
+    "openai/qwen3.8-max-0902": (1.61025641025641, 4.83076923076923, 0.16102564102564),
 }
 
 

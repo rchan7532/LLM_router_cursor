@@ -149,6 +149,24 @@ model_list:
       cache_read_input_token_cost: 0.000000101
       cache_creation_input_token_cost: 0.00000101
 
+  # qwen3.8-max-0902 in the fleet (2026-10-02): the planning/design specialist.
+  # Trial receipts (146 calls, 91% cache, HK$39.78) earned it the design kind;
+  # its 0.92 design cap + latency=2 keeps it off cheap/interactive kinds, and
+  # the exec-phase demotion moves later tool turns back to flash.
+  - model_name: cursor-auto
+    litellm_params:
+      model: openai/qwen3.8-max-0902
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
+      timeout: 600
+    model_info:
+      supports_vision: false
+      max_input_tokens: 262000
+      input_cost_per_token: 0.00000161025641025641
+      output_cost_per_token: 0.00000483076923076923
+      cache_read_input_token_cost: 0.00000016102564102564
+      cache_creation_input_token_cost: 0.00000161025641025641
+
   # ---------------------------------------------------------------------
   # Direct escape hatches. The policy skips a group with fewer than two
   # distinct models, so these route exactly as named.
@@ -226,9 +244,16 @@ model_list:
       timeout: 600
     model_info:
       supports_vision: false
+      max_input_tokens: 262000
+      input_cost_per_token: 0.00000161025641025641
+      output_cost_per_token: 0.00000483076923076923
+      cache_read_input_token_cost: 0.00000016102564102564
+      cache_creation_input_token_cost: 0.00000161025641025641
 
   # Dated snapshot of qwen3.8-max (basic key, live 2026-10-02): pins the
   # exact build for reproducible trials while the alias tracks latest.
+  # Added to the cursor-auto fleet 2026-10-02: auto-routes design/planning
+  # asks to this model; exec-phase demotion moves later turns to flash.
   - model_name: qwen3.8-max-0902
     litellm_params:
       model: openai/qwen3.8-max-0902
@@ -237,6 +262,11 @@ model_list:
       timeout: 600
     model_info:
       supports_vision: false
+      max_input_tokens: 262000
+      input_cost_per_token: 0.00000161025641025641
+      output_cost_per_token: 0.00000483076923076923
+      cache_read_input_token_cost: 0.00000016102564102564
+      cache_creation_input_token_cost: 0.00000161025641025641
 
   # ---------------------------------------------------------------------
   # Speed escape hatches (2026-09-29): single-model groups the policy skips

@@ -793,14 +793,20 @@ def test_pin_holds_through_grace_then_competes():
         run(follow)
         assert follow.candidate_models[0] == served
 
-    # Turn GRACE+1: the pin now competes. glm-5.3-flash (code_edit 0.72,
-    # cents per 1M) beats kimi's utility by more than the loyalty bonus.
-    follow = Context(ask(_normal_code_edit_followup()))
-    run(follow)
-    decision = follow.signals["policy"]
-    assert decision["reason"] == "pin-swap", decision
-    assert follow.candidate_models[0] != served
-    assert policy._blended_cost(policy.PROFILES[follow.candidate_models[0]]) < policy._blended_cost(policy.PROFILES[served])
+    # After grace the pin must surrender to a cheaper model within the
+    # premium ceiling: the loyalty bonus can delay the swap (the challenger
+    # must beat the cold-cache floor), never prevent it. The exact swap turn
+    # shifts with the fleet's cost spread - adding a more expensive model
+    # compresses min-max cost scores - so do not pin it to GRACE+1.
+    swapped = None
+    for _ in range(policy.PIN_PREMIUM_CEIL + 2):
+        follow = Context(ask(_normal_code_edit_followup()))
+        run(follow)
+        if follow.candidate_models[0] != served:
+            swapped = follow.candidate_models[0]
+            break
+    assert swapped is not None, "premium pin never surrendered after grace"
+    assert policy._blended_cost(policy.PROFILES[swapped]) < policy._blended_cost(policy.PROFILES[served])
 
 
 def test_pin_swap_resets_grace_no_ping_pong():
@@ -811,23 +817,24 @@ def test_pin_swap_resets_grace_no_ping_pong():
     run(first)
     served = first.candidate_models[0]
 
-    # Drive past grace until a swap happens (bounded: 30 turns max).
+    # Drive until the model changes (bounded: premium ceiling + margin).
+    # The surrender may arrive as a loyalty pin-swap or as the premium
+    # ceiling forcing a fresh decision; both end the premium run.
     swapped_to = None
-    for _ in range(30):
+    for _ in range(policy.PIN_PREMIUM_CEIL + 2):
         follow = Context(ask(_normal_code_edit_followup()))
         run(follow)
         if follow.candidate_models[0] != served:
             swapped_to = follow.candidate_models[0]
-            assert follow.signals["policy"]["reason"] == "pin-swap"
             break
     assert swapped_to is not None, "pin never surrendered the task in 30 turns"
 
-    # The very next turn must NOT swap back: the new model is in its own
-    # grace window.
+    # The very next turn must NOT swap back: the new model holds the task
+    # (its own grace window, or it simply wins the fresh decision again).
     follow = Context(ask(_normal_code_edit_followup()))
     run(follow)
     assert follow.candidate_models[0] == swapped_to
-    assert follow.signals["policy"]["reason"] == "pinned-grace"
+    assert follow.signals["policy"]["reason"] != "pin-swap"
 
 
 def test_pin_breaks_when_bar_outruns_held_model():

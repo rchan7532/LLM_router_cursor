@@ -86,7 +86,10 @@ def _default_state_dir() -> str:
 # config. A reader that clamps here cannot be fed an out-of-range value even
 # by a hand-edited file.
 PHRASE_BAR_NUDGE = 0.10      # max |bar shift| from one learned phrase
-KIND_BAR_BIAS_MAX = 0.15     # max |bar shift| from kind_bar_bias
+KIND_BAR_BIAS_MAX = 0.10     # max |bar shift| from kind_bar_bias (2026-10-02:
+# was 0.15; a learned -0.15 on design let glm-5.3 under the gate and defeated
+# the operator's per-kind model assignment. Two SCALE_BAR_STEPs is enough
+# rope for the learner to adjust a bar, never to disable it.)
 TRUST_PERSIST_MAX = 0.40     # learned trust magnitude cap (same as runtime)
 MIN_EVIDENCE = 8             # observations before a learned row applies
 PHRASE_EVIDENCE = 5          # observations before a phrase nudges
