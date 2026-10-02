@@ -227,6 +227,17 @@ model_list:
     model_info:
       supports_vision: false
 
+  # Dated snapshot of qwen3.8-max (basic key, live 2026-10-02): pins the
+  # exact build for reproducible trials while the alias tracks latest.
+  - model_name: qwen3.8-max-0902
+    litellm_params:
+      model: openai/qwen3.8-max-0902
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
+      timeout: 600
+    model_info:
+      supports_vision: false
+
   # ---------------------------------------------------------------------
   # Speed escape hatches (2026-09-29): single-model groups the policy skips
   # (< 2 distinct models), so they route exactly as named and are never

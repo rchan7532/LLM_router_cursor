@@ -65,6 +65,13 @@ PRICING: dict[str, tuple[float, float, float]] = {
     #     provider prices cache writes separately at the full input rate).
     "openai/glm-5.3-flashx": (0.302, 1.057, 0.0302),
     "openai/mimo-v2.6-pro": (0.2175, 0.435, 0.0018),
+    # Top-tier candidates (2026-10-02 operator prices, HKD at 7.8/USD):
+    #   kimi-k3:          18.6516 in / 93.1952 out / 1.884 cache-read per 1M
+    #   qwen3.8-max-0902: 12.56 in / 37.68 out per 1M (cache rate unconfirmed;
+    #     assumed in/10 like every other entry until the operator states it)
+    "openai/kimi-k3": (2.3912, 11.9481, 0.2415),
+    "openai/qwen3.8-max": (1.6103, 4.8308, 0.1610),
+    "openai/qwen3.8-max-0902": (1.6103, 4.8308, 0.1610),
 }
 
 
