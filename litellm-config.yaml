@@ -6,10 +6,13 @@
 # should serve it, and narrows the candidate list to that one. litellm still
 # owns retries, per-deployment cooldowns and cross-key failover.
 #
-#   Default key: glm-5.3-flash, glm-5.3 (w=1), kimi-k2.7-code, claude-haiku-4-5,
-#                kimi-k3 (direct name only)
-#   Basic key:   qwen3-vl-flash, qwen3.8-flash, deepseek-v4.1-flash,
-#                glm-5.3 (w=9), qwen3.8-max (direct name only)
+#   Default key: kimi-k2.7-code, claude-haiku-4-5, kimi-k3 (direct name only),
+#                glm-5.3-flashx (exception: provider serves it on DEFAULT only)
+#   Basic key:   qwen3-vl-flash, qwen3.8-flash, glm-5.3-flash, glm-5.3,
+#                deepseek-v4.1-flash, qwen3.8-max (direct name only)
+#   (2026-10-09 operator rule: deepseek and GLM must use the basic key.
+#   Compliance-checked by live probe - all four 200 on BASIC; flashx has no
+#   BASIC channel, so it stays on DEFAULT as the one documented exception.)
 #
 # The direct model names below are escape hatches: if you want to bypass the
 # policy, pick `kimi-k2.7-code` (or another) as the model in Cursor instead of
@@ -48,8 +51,8 @@ model_list:
   - model_name: cursor-auto
     litellm_params:
       model: openai/glm-5.3-flash
-      api_key: os.environ/ROUTER_KEY_DEFAULT
-      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
       timeout: 600
     model_info:
       supports_vision: true
@@ -101,32 +104,15 @@ model_list:
       cache_read_input_token_cost: 0.000000077
       cache_creation_input_token_cost: 0.00000077
 
-  # glm-5.3 on BOTH keys, one logical candidate. The basic key is the primary
-  # (weight 9); the default key absorbs the rest and takes over if it cools down.
-  # Both deployments share a litellm_params.model string, so the policy's
-  # single pick keeps both and litellm load-balances / fails over between them.
+  # glm-5.3 on the BASIC key only (2026-10-09 operator key rule). The former
+  # dual-key 9:1 split is gone; litellm's own cooldowns + retries provide
+  # the resilience the DEFAULT-weight-1 deployment used to add.
   - model_name: cursor-auto
     litellm_params:
       model: openai/glm-5.3
       api_key: os.environ/ROUTER_KEY_BASIC
       api_base: os.environ/ROUTER_KEY_BASIC_BASE
       timeout: 600
-      weight: 9
-    model_info:
-      supports_vision: false
-      max_input_tokens: 200000
-      input_cost_per_token: 0.00000113
-      output_cost_per_token: 0.00000354
-      cache_read_input_token_cost: 0.000000113
-      cache_creation_input_token_cost: 0.00000113
-
-  - model_name: cursor-auto
-    litellm_params:
-      model: openai/glm-5.3
-      api_key: os.environ/ROUTER_KEY_DEFAULT
-      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
-      timeout: 600
-      weight: 1
     model_info:
       supports_vision: false
       max_input_tokens: 200000
@@ -177,17 +163,6 @@ model_list:
       api_key: os.environ/ROUTER_KEY_BASIC
       api_base: os.environ/ROUTER_KEY_BASIC_BASE
       timeout: 600
-      weight: 9
-    model_info:
-      supports_vision: false
-
-  - model_name: glm-5.3
-    litellm_params:
-      model: openai/glm-5.3
-      api_key: os.environ/ROUTER_KEY_DEFAULT
-      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
-      timeout: 600
-      weight: 1
     model_info:
       supports_vision: false
 
@@ -203,8 +178,8 @@ model_list:
   - model_name: glm-5.3-flash
     litellm_params:
       model: openai/glm-5.3-flash
-      api_key: os.environ/ROUTER_KEY_DEFAULT
-      api_base: os.environ/ROUTER_KEY_DEFAULT_BASE
+      api_key: os.environ/ROUTER_KEY_BASIC
+      api_base: os.environ/ROUTER_KEY_BASIC_BASE
       timeout: 600
     model_info:
       supports_vision: true
@@ -271,8 +246,10 @@ model_list:
   # ---------------------------------------------------------------------
   # Speed escape hatches (2026-09-29): single-model groups the policy skips
   # (< 2 distinct models), so they route exactly as named and are never
-  # auto-picked into cursor-auto. glm-5.3-flashx is ToAI-billed (company);
-  # mimo-v2.6-pro runs on the operator's personal key (personal cost).
+  # auto-picked into cursor-auto. mimo-v2.6-pro runs on the operator's
+  # personal key (personal cost). glm-5.3-flashx stays on the DEFAULT key:
+  # the 2026-10-09 operator rule moves GLM to basic, but the provider serves
+  # flashx ONLY on DEFAULT (BASIC has no channel for it, probe 2026-10-09).
   # Receipts price both via usage_state.PRICING.
   # ---------------------------------------------------------------------
   - model_name: glm-5.3-flashx
