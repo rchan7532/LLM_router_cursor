@@ -33,6 +33,10 @@ services:
       # usage_hook.py is the post-call receipt callback (litellm_settings
       # .callbacks) feeding the same files.
       - ./usage_hook.py:/app/usage_hook.py:ro
+      # tool_repair.py is the pre-call tool_call canonicalizer
+      # (litellm_settings.callbacks). Repairs malformed message arrays before
+      # upstream validators see them; no-op on clean traffic.
+      - ./tool_repair.py:/app/tool_repair.py:ro
       - router-logs:/app/logs
       # Crossed mounts (review B4): the proxy READS control.json and can
       # never write it; only the control service has the rw mount. learned.json

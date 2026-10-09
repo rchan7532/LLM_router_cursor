@@ -303,6 +303,13 @@ litellm_settings:
     # signals. Feeds routing_usage.jsonl + usage_state.json and lets the
     # kind-alarm fire on REAL spend. Inert with POLICY_USAGE_RECORD=0.
     - usage_hook.usage_recorder
+    # Pre-call tool_call canonicalization (2026-01-09): repairs malformed
+    # message arrays (orphaned tool results, unanswered tool_calls, duplicate
+    # ids, interleaved/late declarations) before any upstream validator sees
+    # them. Fixes the 400 `tool_call_id does not match a preceding assistant
+    # tool call` seen in long agentic sessions after Cursor compaction.
+    # Inert with POLICY_TOOL_REPAIR=0; no-op on clean traffic.
+    - tool_repair.repair_hook
 
 general_settings:
   # Cursor must send this as its "API key". Keeps the proxy closed.
