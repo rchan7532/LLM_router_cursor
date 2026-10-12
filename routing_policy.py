@@ -418,6 +418,18 @@ IMPORTANCE_OFFSETS = (-0.10, 0.0, 0.10)
 # glm-5.3-flash (0.23) and the flashes sit below; kimi/glm-5.3/haiku above.
 PREMIUM_COST = 1.0
 
+# Runaway-volume guard (2026-10-09 incident: one agentic session re-sent a
+# ~55M-token prompt across 445 calls in one hour and burned ~HK$100 on
+# kimi-k2.7-code). In a tool loop the money is the RE-SENT context, not the
+# output: the conversation grows, every call re-bills its whole size. Once a
+# session has pushed this much cumulative prompt volume (or run this many
+# turns), it is looping on volume - it gets the same demotion as a budget-cap
+# breach (cheapest model clearing BASE_BAR, no scale/importance escalation).
+# Explicit [[use:]]/[[high]]/[[escalate]] and a live lease still win, matching
+# the budget-cap precedence rules.
+RUNAWAY_PROMPT_TOKENS = 12_000_000
+RUNAWAY_TURNS = 120
+
 # --------------------------------------------------------------------------
 # Model profiles
 #
@@ -799,13 +811,41 @@ HIGH_PHRASES = (
     "think through", "step by step plan", "break down",
 )
 
+BRIEF_SHAPE_RE = re.compile(r"^\s*#{2,4}\s*task\b", re.IGNORECASE)
 
-def _detect_importance(ask: str, kind: str, directives: frozenset[str], est_tokens: int) -> int:
+
+def _is_mechanical_brief(ask: str) -> bool:
+    """SDD brief shape: task heading + most of the payload inside code fences.
+
+    The thinking is done upstream: the brief is a planner's transcription
+    order, not an open design ask. Its prose carries the PLANNER's words —
+    "restructure", "critical", "production-ready" — but the executing model
+    makes no architectural choice, so the phrase scan must not read those
+    words as ask capability. The 2026-10-09 Kimi overspend ran on exactly
+    this shape: mechanical implementation briefs scored High and routed
+    premium. Detection is shape-based, keyword-free: heading + fence share.
+    """
+    stripped = ask.strip()
+    if not BRIEF_SHAPE_RE.match(stripped):
+        return False
+    fenced = sum(len(match.group(0)) for match in CODE_FENCE_BLOCK_RE.finditer(ask))
+    return fenced >= max(400, len(stripped) * 0.4)
+
+
+def _detect_importance(
+    ask: str,
+    kind: str,
+    directives: frozenset[str],
+    est_tokens: int,
+    raw: str | None = None,
+) -> int:
     """0 = Low, 1 = Normal, 2 = High, from the MARGINAL ask only.
 
     Two goals, in order: never send real work to a weak model, and never pay
     a premium model for a trivial follow-up. Manual [[low]] / [[high]] win
     outright; the heuristic must stay conservative (prefer Normal on doubt).
+    `raw` is the unstripped ask, used only for mechanical-brief shape
+    detection (fence share needs the fences).
     """
     lowered = ask.lower().strip()
     if "low" in directives:
@@ -814,6 +854,11 @@ def _detect_importance(ask: str, kind: str, directives: frozenset[str], est_toke
         return 2
     if "escalate" in directives:
         return 2
+    # Mechanical brief guard (2026-10-09 SDD overspend): a planner's task
+    # order is transcription work no matter which verbs its prose carries.
+    # Never High here; directives above still win.
+    if _is_mechanical_brief(raw if raw is not None else ask):
+        return 1
     # One-liners and acknowledgements: the answer is worth cents, not HKD.
     if LOW_ASK_RE.match(lowered):
         return 0
@@ -834,7 +879,11 @@ def _detect_importance(ask: str, kind: str, directives: frozenset[str], est_toke
     )
     if high_hits >= 2:
         return 2
-    if high_hits >= 1 and (kind in {"design", "refactor", "review"} or len(lowered) > 400):
+    # A single keyword hit promotes only in the kinds where the model makes
+    # real choices. Length alone never promoted anyone: a 400-char ask with
+    # one keyword ("restructure the imports") is routine work (2026-10-09
+    # fix: the len clause was the second half of the SDD overspend).
+    if high_hits >= 1 and kind in {"design", "refactor", "review"}:
         return 2
     return 1
 
@@ -1010,7 +1059,7 @@ def build_signature(messages: Sequence[Mapping[str, Any]]) -> Signature | None:
         directives=frozenset(directives),
         use_model=use_model,
         stall=_detect_stall(messages),
-        importance=_detect_importance(instruction, kind, frozenset(directives), est_tokens),
+        importance=_detect_importance(instruction, kind, frozenset(directives), est_tokens, raw=ask),
         ask_tokens=len(instruction) // 4,
         task_tag=task_tag,
     )
@@ -1778,6 +1827,20 @@ class CursorAutoPolicy:
             and not ({"escalate", "high", "use"} & signature.directives)
             and not (lease_profile is not None and signature.use_model)
         )
+        # Runaway volume: the session has re-sent so much prompt (or run so
+        # many turns) that it is looping on volume. Same precedence as a
+        # budget breach - explicit directives and a live lease still win - and
+        # the same demotion. 2026-10-09: 54.9M prompt tokens in one hour on
+        # kimi while the HK$30 cap was already breached.
+        runaway = (
+            previous is not None
+            and not ({"escalate", "high", "use"} & signature.directives)
+            and not (lease_profile is not None and signature.use_model)
+            and (
+                int(previous.get("prompt_tokens", 0) or 0) >= RUNAWAY_PROMPT_TOKENS
+                or int(previous.get("turns", 0) or 0) >= RUNAWAY_TURNS
+            )
+        )
 
         reason = "fresh"
         gate_reason = "ok"
@@ -1792,7 +1855,9 @@ class CursorAutoPolicy:
         # Budget breach is a safety override: it beats pinned-cache (but NOT
         # explicit [[use:]] or a live lease), so a long session cannot keep
         # paying premium rates on every trivial follow-up once the cap is hit.
-        if budget_breached:
+        # Runaway volume is the same kind of override - stickiness must not
+        # hold the premium model through a runaway tool loop either.
+        if budget_breached or runaway:
             pinned = None
             pin_held = None
         if lease_profile is not None and signature.use_model and \
@@ -1847,16 +1912,30 @@ class CursorAutoPolicy:
                         reason = "pin-swap"
             if winner is pinned and reason == "fresh":
                 reason = "pinned-loyalty"
-        elif budget_breached or kind_alarm_active:
+        elif budget_breached or runaway or kind_alarm_active:
             # Force the cheapest model that still clears the capability gate.
             # We keep the same gate/bar so safety is preserved; we just pick
             # by cost instead of utility. This path is shared by the global
             # session budget cap and the per-(model, kind) spend alarm.
+            #
+            # The gate uses BASE_BAR alone, not the escalated `bar`. A budget-cap
+            # breach exists to STOP paying premium rates on follow-ups; but an
+            # importance/scale-escalated bar (0.85 on a High+large code_gen
+            # turn) has already excluded the whole flash tier, leaving kimi the
+            # cheapest survivor. The demotion is then a no-op - exactly the
+            # 2026-10-09 incident (budget-cap re-picked kimi 398 times). Dropping
+            # BOTH the scale and importance escalation is deliberate: a High
+            # importance that survived into a budget breach is precisely the
+            # case to stop paying premium for. BASE_BAR keeps the kind's real
+            # capability floor plus the hard safety gates (image -> vision,
+            # ctx_window 0.9, cascade exclusion) intact.
+            demotion_bar = BASE_BAR.get(signature.kind, 0.6)
+            bar = demotion_bar  # log the bar this branch actually applied
             capable = [
                 profile for profile in known
                 if (not signature.has_image or profile.vision)
                 and signature.est_tokens < profile.ctx_window * 0.9
-                and profile.cap.get(signature.kind, 0.5) >= bar
+                and profile.cap.get(signature.kind, 0.5) >= demotion_bar
                 and profile.model not in cascade_excluded
             ]
             if not capable:
@@ -1875,7 +1954,12 @@ class CursorAutoPolicy:
                 cascade_fallback = True
             capable.sort(key=_blended_cost)
             winner = capable[0] if capable else known[0]
-            reason = "budget-cap" if budget_breached else "kind-alarm"
+            if budget_breached:
+                reason = "budget-cap"
+            elif runaway:
+                reason = "runaway"
+            else:
+                reason = "kind-alarm"
             for profile in known:
                 scored.append(
                     Candidate(profile=profile, capability=profile.cap.get(signature.kind, 0.5),
@@ -1920,6 +2004,11 @@ class CursorAutoPolicy:
                 "kind": signature.kind,
                 "ts": time.time(),
                 "turns": turns_now,
+                # Cumulative prompt volume re-sent this session (C5, RAM-only).
+                # The runaway-volume guard reads it next turn; it is the sum of
+                # est_tokens, i.e. every token billed as input across the loop.
+                "prompt_tokens": (int(previous.get("prompt_tokens", 0) or 0) if previous else 0)
+                + int(signature.est_tokens or 0),
                 # RAM-only (C5): the session's newest ask, for the skip-path
                 # observer's topical-continuity check and the learner's B2
                 # containment verdict on the NEXT turn.
@@ -1965,6 +2054,7 @@ class CursorAutoPolicy:
             "real_spend_hkd": real_spend_hkd,
             "budget_hkd": budget,
             "budget_alarm": budget_breached,
+            "runaway": runaway,
             "kind_alarm": kind_alarm_active,
             "kind_alarm_model": kind_alarm_model,
             "kind_alarm_basis": kind_alarm_basis,
@@ -2003,6 +2093,7 @@ class CursorAutoPolicy:
                 "spend_hkd": round(STATE.session_spend(session_key), 4),
                 "budget_hkd": budget,
                 "budget_alarm": budget_breached,
+                "runaway": runaway,
                 "kind_alarm": kind_alarm_active,
                 "kind_alarm_model": kind_alarm_model,
                 "kind_alarm_basis": kind_alarm_basis,

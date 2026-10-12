@@ -483,6 +483,66 @@ def test_importance_detection_manual_and_heuristic():
     assert policy._detect_importance("fix the failing test in report_parser.py", "debug", frozenset(), 60) == 1
 
 
+def _sdd_brief() -> str:
+    """Shape of the 2026-10-09 overspend brief: planner's task order whose
+    prose carries high vocabulary ("restructure", "critical") while the
+    payload is a big code block the executing model only transcribes."""
+    code = "\n".join(f"    <PanelRow key={{{i}}} label={{row.{i}}} value={{v.{i}}} />" for i in range(30))
+    return (
+        "### Task 3 — Rework the IoT monitoring panel\n\n"
+        "This is critical work: restructure the panel to the spec below and\n"
+        "make it production-ready. The following is the exact implementation.\n\n"
+        "```jsx\nfunction MonitorPanel({ rows, v }) {\n  return (\n    <Panel>\n"
+        + code + "\n    </Panel>\n  );\n}\n```\n"
+    )
+
+
+def test_mechanical_brief_never_routes_high():
+    reset()
+    brief = _sdd_brief()
+    assert policy._is_mechanical_brief(brief)
+    stripped = policy.CODE_FENCE_BLOCK_RE.sub(" ", brief)
+    # The prose alone carries >= 2 high hits (restructure + critical +
+    # production-ready + spec) and is short after stripping, so without the
+    # brief guard this shape scored High on both old clauses.
+    assert policy._detect_importance(stripped, "code_gen", frozenset(), 120, raw=brief) == 1
+    # Explicit intent still wins on a brief.
+    assert policy._detect_importance(stripped, "code_gen", frozenset({"high"}), 120, raw=brief) == 2
+
+
+def test_length_alone_no_longer_promotes():
+    reset()
+    # One keyword hit + long ask, kind outside design/refactor/review: this
+    # was High via the len clause, now Normal.
+    long_ask = (
+        "please restructure the import statements in the four modules while "
+        "keeping behavior identical; there are many files and the diff will "
+        "be large, so take it module by module and keep each step mechanical "
+        "without changing any signatures or call sites anywhere at all ok? "
+        "also run the linter afterwards on each module one at a time and fix "
+        "only the import ordering complaints that it reports, nothing else "
+        "and do not touch the exports of any module under any circumstances"
+    )
+    assert len(long_ask) > 400
+    assert policy._detect_importance(long_ask, "code_edit", frozenset(), 200) == 1
+    # The design-kind clause is untouched: a real architecture ask stays High.
+    assert policy._detect_importance(
+        "restructure the storage layer for the new schema", "design", frozenset(), 300
+    ) == 2
+    # Two hits still promote in any kind.
+    assert policy._detect_importance(
+        "architect the sync layer and plan the migration rollout",
+        "code_edit", frozenset(), 300,
+    ) == 2
+
+
+def test_non_brief_doc_is_not_mechanical():
+    reset()
+    doc = "Design the new IoT monitoring panel.\n\n" + "It should show device state.\n" * 40
+    assert not policy._is_mechanical_brief(doc)
+    assert policy._is_mechanical_brief("## task 2: rename the field") is False  # no fenced payload
+
+
 def test_low_importance_drops_the_capability_bar():
     reset()
     sig_low = policy.build_signature(ask("add a comment to the config file [[low]]"))
@@ -626,6 +686,91 @@ def test_session_spend_accumulates_and_triggers_cap():
     assert policy.STATE.session_spend(ctx.signals["policy"]["session"]) >= 0.0025
 
 
+def test_budget_cap_demotes_high_code_gen_to_flash_not_kimi():
+    # 2026-10-09 incident regression. A High-importance, large code_gen session
+    # on kimi breached the budget; the demotion gate used the ESCALATED bar
+    # (0.75 = 0.65 BASE_BAR + 0.10 importance), which had already excluded the
+    # whole flash tier (glm-5.3-flash code_gen=0.70 < 0.75). "Cheapest eligible"
+    # then meant kimi again (blended 2.12), so budget-cap re-picked kimi 398
+    # times while the cap was already breached. The fix drops the escalation
+    # in the demotion path: BASE_BAR (0.65) lets glm-5.3-flash (0.70) clear.
+    reset()
+
+    tmp = tempfile.mkdtemp(prefix="budget-")
+    store = ControlStore(
+        control_path=os.path.join(tmp, "control.json"),
+        learned_path=os.path.join(tmp, "learned.json"),
+    )
+    with open(store._control_path, "w", encoding="utf-8") as fh:
+        json.dump({"budget_hkd": 0.0005, "revision": 1}, fh)
+    _with_store(store)
+
+    # High importance via HIGH_PHRASES (critical / production-ready / think
+    # through), NOT [[high]] - a [[high]] directive is exempt from budget-cap
+    # by design and would not reproduce the incident.
+    incident_ask = (
+        "build the provisioning module. make it critical and "
+        "production-ready and think through the edge cases."
+    )
+    first = Context(ask(incident_ask))
+    run(first)
+    # Turn 1: setup is valid - High importance, premium model, no breach yet.
+    assert first.signals["policy"]["importance"] == 2, first.signals["policy"]
+    assert first.signals["policy"]["reason"] != "budget-cap"
+    assert policy._blended_cost(policy.PROFILES[first.candidate_models[0]]) > policy.PREMIUM_COST
+
+    # Turn 2: budget now breached. Must demote to the flash tier, not kimi.
+    ctx = Context(ask(incident_ask))
+    run(ctx)
+    assert ctx.signals["policy"]["reason"] == "budget-cap", ctx.signals["policy"]
+    assert ctx.signals["policy"]["budget_alarm"] is True
+    chosen = ctx.candidate_models[0]
+    assert chosen == "openai/glm-5.3-flash", ctx.signals["policy"]
+    assert policy._blended_cost(policy.PROFILES[chosen]) < policy.PREMIUM_COST
+
+
+def test_runaway_volume_forces_demotion_without_budget():
+    # The runaway-volume guard (volume/turns, independent of any HKD cap) must
+    # demote a looping session to the cheapest model clearing BASE_BAR even
+    # when no budget is set. Mirrors the same incident: a 445-call tool loop
+    # keeps re-sending a growing prompt, so the spend is the re-sent context,
+    # not the output. Thresholds are lowered here so the guard fires in a few
+    # turns instead of RUNAWAY_TURNS; restored in finally.
+    reset()
+
+    tmp = tempfile.mkdtemp(prefix="runaway-")
+    store = ControlStore(
+        control_path=os.path.join(tmp, "control.json"),
+        learned_path=os.path.join(tmp, "learned.json"),
+    )
+    _with_store(store)  # no budget_hkd -> budget is None
+
+    saved = (policy.RUNAWAY_TURNS, policy.RUNAWAY_PROMPT_TOKENS)
+    policy.RUNAWAY_TURNS = 3
+    policy.RUNAWAY_PROMPT_TOKENS = 10 ** 12  # unreachable; test the turn counter
+    try:
+        ask_text = (
+            "build the provisioning module. make it critical and "
+            "production-ready and think through the edge cases."
+        )
+        first = Context(ask(ask_text))
+        run(first)
+        assert first.signals["policy"]["reason"] != "runaway"
+
+        fired = None
+        for _ in range(5):
+            ctx = Context(ask(ask_text))
+            run(ctx)
+            if ctx.signals["policy"].get("runaway"):
+                fired = ctx
+                break
+        assert fired is not None, "runaway guard never fired"
+        assert fired.signals["policy"]["reason"] == "runaway", fired.signals["policy"]
+        assert fired.candidate_models[0] == "openai/glm-5.3-flash", fired.signals["policy"]
+    finally:
+        policy.RUNAWAY_TURNS, policy.RUNAWAY_PROMPT_TOKENS = saved
+
+
 # --- cascade-lite ---------------------------------------------------------
 
 def _cascade_store():
@@ -704,10 +849,13 @@ def test_cascade_disabled_when_learning_off():
 _LONG_PAD = "with careful handling of edge cases, timezone conversions, and malformed input rows. " * 40
 
 def _long_high_code_edit():
-    # code_edit kind (path fallback), High importance ("production-ready" +
-    # long ask), ask_scale 2 -> bar 0.75 -> only premium models clear.
+    # code_edit kind (path fallback), High importance via two phrase hits
+    # ("critical" + "production-ready"; both kind-neutral). Since the
+    # 2026-10-09 fix, length alone never promotes, so a High fixture must
+    # carry real high vocabulary. ask_scale 2 -> bar 0.75 -> only premium
+    # models clear.
     return ("update src/report_parser.py to handle the new date formats, "
-            "production-ready, " + _LONG_PAD)
+            "critical, production-ready, " + _LONG_PAD)
 
 def _normal_code_edit_followup():
     # Same kind (code_edit: >120 conversation tokens, path present, no
